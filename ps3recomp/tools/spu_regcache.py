@@ -224,6 +224,13 @@ def main():
     for d in sorted(os.listdir(root)):
         p = os.path.join(root, d, 'spu_recomp.c')
         if not os.path.isfile(p): continue
+        if d == 'wwsplug':
+            # plug_lift.py writes this folder's own spu_recomp_rc.c (one symbol prefix per plugin, wwsplugNN_).
+            # A fresh pipeline runs this step before the plugin step, so the folder only exists here when the
+            # pipeline is re-run over an existing install (--regen, or an update that regenerates): skip it,
+            # exactly as on a fresh run.
+            print('%-40s skipped (lifted by plug_lift.py)' % d)
+            continue
         src = open(p, encoding='utf-8', errors='surrogateescape').read()
         dst, nf = xform_file(src)
         if not plain: dst, _ = twin(dst, src)
