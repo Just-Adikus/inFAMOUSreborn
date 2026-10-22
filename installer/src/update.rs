@@ -938,16 +938,30 @@ mod tests {
 
 #[cfg(test)]
 mod manifest_tests {
-    #[test]
-    fn shipped_manifest_has_update_section() {
-        let m = crate::manifest::Manifest::load(std::path::Path::new(concat!(
+    fn shipped_manifest() -> crate::manifest::Manifest {
+        crate::manifest::Manifest::load(std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/infamous.toml"
         )))
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn shipped_manifest_has_update_section() {
+        let m = shipped_manifest();
         assert_eq!(m.update_repo.as_deref(), Some("whompay/inFAMOUSreborn"));
         assert_eq!(m.update_branch, "main");
         assert_eq!(m.update_path, "");
+    }
+
+    #[test]
+    fn shipped_spu_lift_overwrites_patched_outputs() {
+        let m = shipped_manifest();
+        let step = m.steps.iter().find(|s| s.id == "spu-lift").unwrap();
+        assert!(
+            step.run.iter().any(|arg| arg == "--relift"),
+            "spu-lift must overwrite previously patched sources during --regen/update"
+        );
     }
 }
 

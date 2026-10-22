@@ -124,7 +124,8 @@ title = "Lift the SPU programs and generate their registration table"
 run = ["{python}", "{toolkit}/tools/build_spu_workloads.py",
        "--images", "{port}/spu-images", "--lifted", "{port}/spu",
        "--out", "{port}/spu/spu_workloads.c",
-       "--register-fn", "infamous_spu_register_all", "--title", "inFamous"]
+       "--register-fn", "infamous_spu_register_all", "--title", "inFamous",
+       "--relift"]
 
 [[step]]
 id = "jobmods-extract"
