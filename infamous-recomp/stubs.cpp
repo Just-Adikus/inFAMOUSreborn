@@ -22,6 +22,7 @@
 /* v237B ADAPT_LOD: adaptive draw-distance factor (infamous_clock_probe.h writes it, lodx_v231.h reads it; 1 = off) */
 extern "C" { volatile float g_v237_lodf = 1.0f; }
 #include "infamous_clock_probe.h"
+#include "trainer.h"   /* F10 trainer */
 #include "ps3emu/ps3types.h"
 #include "ps3emu/error_codes.h"
 extern "C" uint8_t* vm_base;   /* C linkage: defined in main.cpp */
@@ -327,6 +328,7 @@ extern "C" void ps3_load_prx_modules(void)
     ps3_sampler_start();
     infamous_hangdump_start();
     pm_start();   /* v195 native pause-menu entries */
+    infamous_trainer_install();   /* F10 trainer (trainer.cpp); TRAINER=0 = off */
     ps3_hle_register_ctx(0x8A85674Du, "_cellSpursLFQueuePushBody",
                          infamous_cellSpursLFQueuePushBody);
 }
@@ -600,8 +602,11 @@ extern "C" void infamous_anim_lod_note(ppu_context* ctx)
     }
     s_al_kick[szc >= 0x100u ? 15 : (szc >> 4) & 15]++;
 }
+/* trainer.cpp: the Player Model stand-in's animation job is replaced by Cole's bones (1 = skip, report done) */
+extern "C" int infamous_trainer_anim_hook(uint32_t anim_obj);
 extern "C" int infamous_anim_lod_skip(ppu_context* ctx)
 {
+    if (infamous_trainer_anim_hook((uint32_t)ctx->gpr[3])) return 1;
     if (!al_enabled()) return 0;
     const unsigned frame = ppu_boot_frames_presented();
     if (frame != s_al_last_frame) { s_al_last_frame = frame; al_report(frame); }
@@ -628,3 +633,7 @@ extern "C" int infamous_anim_lod_skip(ppu_context* ctx)
 
 /* v233: car pop-in probe + CAR_DIST_SCALE / CAR_TRAFFIC_RADIUS knobs (inert unless set; see car_v233.h) */
 #include "car_v233.h"
+
+/* v243K (from PR #25): the game language for the in-game Settings menu's Language row: PS3_LANG (inert unless it
+ * names a language the US release lacks; see the header) */
+#include "infamous_lang.h"

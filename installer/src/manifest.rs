@@ -68,6 +68,9 @@ pub struct Manifest {
 
     pub export_exclude: Vec<String>,
     pub export_keep: Vec<String>,
+    /// `[export] forbid`: files that must never be published or packed into a setup (private
+    /// mods, notes). `export` / `package` refuse to run while any of them would be included.
+    pub export_forbid: Vec<String>,
 
     /// `[update]`: where `infamous-installer update` fetches new versions (a GitHub repository
     /// holding the `export` tree). `None` = updating is not configured.
@@ -75,6 +78,9 @@ pub struct Manifest {
     pub update_branch: String,
     /// Folder inside the repository that holds the tree ("" = the repository root).
     pub update_path: String,
+    /// `[update] obsolete`: files an older setup or update left behind that the repository no
+    /// longer has; `update` deletes them wherever they still exist.
+    pub update_obsolete: Vec<String>,
 }
 
 fn table<'a>(t: &'a Table, key: &str) -> Result<&'a Table> {
@@ -257,6 +263,7 @@ impl Manifest {
             launch_stderr: opt_s(launch, "launch", "stderr")?,
             export_exclude: list(export, "export", "exclude")?,
             export_keep: list(export, "export", "keep")?,
+            export_forbid: list(export, "export", "forbid")?,
             update_repo: opt_s(update, "update", "repo")?
                 .map(|r| r.trim().trim_end_matches('/').to_string())
                 .filter(|r| !r.is_empty()),
@@ -267,6 +274,7 @@ impl Manifest {
                 .unwrap_or_default()
                 .trim_matches('/')
                 .to_string(),
+            update_obsolete: list(update, "update", "obsolete")?,
         })
     }
 

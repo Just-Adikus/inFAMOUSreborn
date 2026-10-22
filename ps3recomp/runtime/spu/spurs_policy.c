@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "spu_laneprof.h"   /* v96a [LANEPROF] */
+unsigned long long w6tl_qpc(void);   /* v246 W6TL */
 #include <time.h>
 
 /* ---------------------------------------------------------------------------
@@ -591,7 +592,10 @@ int spu_run_policy_module(spu_lifted_entry_fn entry, int image_id,
     { void (*ph)(int) = g_prof_spu_wid_hook; if (ph) ph((int)wid); }                  /* v147 PS3_PROF_WID */
     unsigned long long lcpu_c0 = 0, lcpu_t0 = 0; int lcpu_cpu0 = -1;                  /* v221A [LANECPU] */
     if (lp_on && lcpu_on()) lcpu_begin(&lcpu_c0, &lcpu_t0, &lcpu_cpu0);
+    extern int w6tl_wid; extern void w6tl_run(int lane, unsigned long long t0, int busy);   /* v246 W6TL diagnostic */
+    const unsigned long long w6tl_t0 = ((int)wid == w6tl_wid) ? w6tl_qpc() : 0;
     const int pm_halted = spu_run_with_halt(entry, ctx);
+    if (w6tl_t0) w6tl_run((int)spu_num, w6tl_t0, g_spurs_pm_polls != 0);
     if (lcpu_t0) lcpu_end(wid, g_spurs_pm_polls != 0, lcpu_c0, lcpu_t0, lcpu_cpu0);
     { void (*ph)(int) = g_prof_spu_wid_hook; if (ph) ph(-1); }
     if (lp_on) __atomic_sub_fetch(&s_lc_active[wid & 15], 1, __ATOMIC_RELAXED);
@@ -1110,4 +1114,105 @@ static void lcpu_report(void)
                 w, v[0], 100.0 * (double)v[2] / (double)v[1], 100.0 * (double)v[3] / (double)v[0],
                 100.0 * (double)v[4] / (double)v[1], 100.0 * (double)v[5] / (double)v[0], (unsigned)g_abx);
     }
+}
+
+/* ---- v246 W6TL=<wid> (diagnostic, default off): timeline of the PPU's waits on ONE workload (meant for w6 = world
+ * cull, ~15 % of the main thread idle in b1014). Records every policy-module run of that wid (lane, QPC start/end,
+ * busy = it polled work) and every PPU task wait attributed to it (cellSpurs.c ps3_taskwait_end -> w6tl_wait). Every
+ * 10 s prints [W6TL]: per wait third (early / middle / late) the share of wait time with 0..6 busy lanes, the delay from
+ * wait start to the first busy run, the gap from the last busy run's end to the wait end, run lengths, plus a few
+ * example timelines. Observation only: nothing about scheduling changes. */
+#ifdef _WIN32
+#include <windows.h>
+#endif
+int w6tl_wid = -2;   /* -2 = not initialised (first wait reads W6TL), -1 = off */
+static double s_w6tl_us_per_tick = 0;
+unsigned long long w6tl_qpc(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return (unsigned long long)t.QuadPart; }
+#define W6TL_RN 262144
+#define W6TL_WN 8192
+struct w6tl_run_ev { unsigned long long t0, t1; int lane, busy; };
+static struct w6tl_run_ev s_w6tl_r[W6TL_RN];
+static unsigned long long s_w6tl_w[W6TL_WN][2];
+static volatile long s_w6tl_ri = 0, s_w6tl_wi = 0;
+void w6tl_run(int lane, unsigned long long t0, int busy)
+{
+    const long i = __atomic_fetch_add(&s_w6tl_ri, 1, __ATOMIC_RELAXED) & (W6TL_RN - 1);
+    s_w6tl_r[i].t1 = w6tl_qpc(); s_w6tl_r[i].lane = lane; s_w6tl_r[i].busy = busy; s_w6tl_r[i].t0 = t0;
+}
+static void w6tl_report(void)
+{
+    static long r_done = 0, w_done = 0;
+    long r1 = s_w6tl_ri, w1 = s_w6tl_wi, r0 = r_done, w0 = w_done;
+    if (r1 - r0 > W6TL_RN - 1024) r0 = r1 - (W6TL_RN - 1024);
+    if (w1 - w0 > W6TL_WN - 16) w0 = w1 - (W6TL_WN - 16);
+    r_done = r1; w_done = w1;
+    if (r1 <= r0 || w1 <= w0) return;
+    const double k = s_w6tl_us_per_tick; const unsigned long long m = (unsigned long long)(20000.0 / k);   /* runs are logged at their END: scan 20 ms past the wait */
+    double third[3][8] = {{0}}, tot_us = 0, first_sum = 0, tail_sum = 0, busy_us = 0; long nw = 0, nfirst = 0, nbusy = 0, nlong = 0;
+    long hist[6] = {0}; static const double lim[5] = {300, 1000, 2000, 4000, 8000};
+    int shown = 0;
+    /* runs are roughly time-ordered in the ring; for each wait scan a window of runs around it */
+    long rs = r0;
+    for (long wi = w0; wi < w1; wi++) {
+        const unsigned long long a = s_w6tl_w[wi & (W6TL_WN - 1)][0], b = s_w6tl_w[wi & (W6TL_WN - 1)][1];
+        if (b <= a) continue;
+        const double wus = (double)(b - a) * k;
+        int hb = 0; while (hb < 5 && wus >= lim[hb]) hb++; hist[hb]++;
+        if (wus < 100.0) continue;
+        nw++; tot_us += wus; if (wus >= 1000.0) nlong++;
+        /* advance rs to the first run that could overlap (runs end after a - 20 ms) */
+        while (rs < r1 && s_w6tl_r[rs & (W6TL_RN - 1)].t1 + (unsigned long long)(20000.0 / k) < a) rs++;
+        /* sweep: sample the wait at 64 points per third, count busy lanes at each point */
+        unsigned long long fb = 0, lb = 0;
+        for (int t = 0; t < 3; t++) for (int s = 0; s < 64; s++) {
+            const unsigned long long x = a + (unsigned long long)(((double)(b - a)) * ((t * 64 + s) + 0.5) / 192.0);
+            int busy = 0; unsigned lanes = 0;
+            for (long i = rs; i < r1; i++) { const struct w6tl_run_ev* e = &s_w6tl_r[i & (W6TL_RN - 1)];
+                if (e->t0 > b + m) break; if (e->t0 > b) continue;
+                if (e->busy && e->t0 <= x && e->t1 >= x && !((lanes >> (e->lane & 31)) & 1)) { lanes |= 1u << (e->lane & 31); busy++; } }
+            if (busy > 7) busy = 7;
+            third[t][busy] += wus / 192.0;
+        }
+        for (long i = rs; i < r1; i++) { const struct w6tl_run_ev* e = &s_w6tl_r[i & (W6TL_RN - 1)];
+            if (e->t0 > b + m) break; if (e->t0 > b) continue;
+            if (!e->busy || e->t1 < a) continue;
+            if (!fb || e->t0 < fb) fb = e->t0; if (e->t1 > lb) lb = e->t1;
+            busy_us += (double)(e->t1 - e->t0) * k; nbusy++; }
+        if (fb) { first_sum += fb > a ? (double)(fb - a) * k : 0; tail_sum += b > lb ? (double)(b - lb) * k : 0; nfirst++; }
+        if (shown < 3 && wus >= 1500.0) {
+            char line[2048]; int lp = snprintf(line, sizeof line, "[W6TL] example wait %.0f us:", wus);
+            for (long i = rs; i < r1 && lp < (int)sizeof line - 48; i++) { const struct w6tl_run_ev* e = &s_w6tl_r[i & (W6TL_RN - 1)];
+                if (e->t0 > b + m) break; if (e->t0 > b) continue;
+                if (!e->busy || e->t1 < a) continue;
+                lp += snprintf(line + lp, sizeof line - lp, " L%d %.0f..%.0f", e->lane, ((double)e->t0 - (double)a) * k, ((double)e->t1 - (double)a) * k); }
+            fprintf(stderr, "%s\n", line); shown++;
+        }
+    }
+    if (!nw) return;
+    fprintf(stderr, "[W6TL] w%d 10s: %ld waits >= 100 us = %.0f ms (%ld >= 1 ms; all waits <0.3/<1/<2/<4/<8/>=8 ms: %ld/%ld/%ld/%ld/%ld/%ld) | "
+            "first busy run starts %.0f us after the wait starts, last busy run ends %.0f us before the wait ends (avg) | "
+            "busy runs %ld, avg %.0f us\n", w6tl_wid, nw, tot_us / 1000.0, nlong, hist[0], hist[1], hist[2], hist[3], hist[4], hist[5],
+            nfirst ? first_sum / nfirst : 0.0, nfirst ? tail_sum / nfirst : 0.0, nbusy, nbusy ? busy_us / nbusy : 0.0);
+    static const char* nm[3] = { "early", "middle", "late" };
+    for (int t = 0; t < 3; t++) { double s3 = 0; for (int b2 = 0; b2 < 8; b2++) s3 += third[t][b2]; if (s3 <= 0) continue;
+        fprintf(stderr, "[W6TL]   %-6s third of the waits (%.0f ms): busy lanes 0:%.0f%% 1:%.0f%% 2:%.0f%% 3:%.0f%% 4:%.0f%% 5:%.0f%% 6+:%.0f%%\n",
+                nm[t], s3 / 1000.0, 100 * third[t][0] / s3, 100 * third[t][1] / s3, 100 * third[t][2] / s3, 100 * third[t][3] / s3,
+                100 * third[t][4] / s3, 100 * third[t][5] / s3, 100 * (third[t][6] + third[t][7]) / s3); }
+}
+void w6tl_wait(int wid, long long dur_us)
+{
+    if (__builtin_expect(w6tl_wid == -2, 0)) {
+        LARGE_INTEGER f; QueryPerformanceFrequency(&f); s_w6tl_us_per_tick = 1e6 / (double)f.QuadPart;
+        const char* e = getenv("W6TL"); w6tl_wid = (e && *e) ? atoi(e) : -1;
+        if (w6tl_wid >= 0) fprintf(stderr, "[W6TL] v246 wait timeline for wid %d on (diagnostic)\n", w6tl_wid);
+    }
+    if (w6tl_wid < 0) return;
+    static unsigned long long s_last = 0;
+    const unsigned long long now = w6tl_qpc();
+    if (wid == w6tl_wid && dur_us > 0) {
+        const long i = __atomic_fetch_add(&s_w6tl_wi, 1, __ATOMIC_RELAXED) & (W6TL_WN - 1);
+        s_w6tl_w[i][0] = now - (unsigned long long)((double)dur_us / s_w6tl_us_per_tick); s_w6tl_w[i][1] = now;
+    }
+    if (!s_last) s_last = now;
+    else if ((double)(now - s_last) * s_w6tl_us_per_tick >= 10e6) { s_last = now; w6tl_report(); }
 }

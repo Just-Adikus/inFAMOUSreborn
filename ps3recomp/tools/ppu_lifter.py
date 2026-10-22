@@ -3021,7 +3021,7 @@ class PPULifter:
 
         # ------- Default: emit as comment -------
         # v125: an untranslated instruction is silently WRONG code (inFamous: 15 dropped vslo/vsl pairs froze the
-        # world for two days of debugging). Count every one and report at exit.
+        # world for two days of debugging). Count every one and report at exit (playbook fact 110).
         if not mn.startswith(".word"):
             _UNTRANSLATED[mn] += 1
             if _UNTRANSLATED[mn] == 1:

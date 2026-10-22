@@ -201,6 +201,33 @@ static inline int spu_dma_fast_now(void)
     if (__builtin_expect(f < 0, 0)) f = spu_dma_fast_init();
     return f > 0 && g_ab_mask != g_spu_dma_fast_ab;
 }
+/* v246C V246C_DMAPF (default 0 = old path exactly, one global load per transfer): software prefetch of guest memory
+ * a GET is about to read. [DMASTAT] (b920): ~7.2M GET/s (75 % <= 128 B) and ~210k list cmds/s; the w6 lane profile's
+ * hottest spu_wrch rip is the 112-byte GET copy stalling on cache misses Bit 1: inside a GET list,
+ * prefetch the source of element i+D (V246C_DMAPF_D, default 4) while element i is copied. Bit 2: single GETs with a
+ * repeating EA stride (per host thread) prefetch ea+stride. Prefetches never fault and change no data: exact.
+ * V246C_DMAPF_PHASE=0|1: only in PS3_AB phases of that parity (in-run A/B). */
+extern int g_v246c_dmapf;          /* -1 = not initialised, else bit mask (0 = off) */
+extern int g_v246c_dmapf_phase;    /* -1 = every phase */
+extern int g_v246c_dmapf_d;
+extern volatile int g_ab_phase;
+int v246c_dmapf_init(void);
+typedef struct v246c_pf_tls { uint32_t last_ea; int32_t stride; } v246c_pf_tls;
+extern SPU_THREAD_LOCAL v246c_pf_tls g_v246c_pf;
+static inline int v246c_dmapf_now(void)
+{
+    int f = g_v246c_dmapf;
+    if (__builtin_expect(f < 0, 0)) f = v246c_dmapf_init();
+    if (__builtin_expect(f == 0, 1)) return 0;
+    const int ph = g_v246c_dmapf_phase;
+    return (ph < 0 || (g_ab_phase & 1) == ph) ? f : 0;
+}
+static inline __attribute__((always_inline)) void v246c_pf_range(const uint8_t* p, uint32_t n)
+{
+    uintptr_t a = (uintptr_t)p & ~(uintptr_t)63;
+    const uintptr_t e = (uintptr_t)p + (n > 512u ? 512u : n);
+    for (; a < e; a += 64) __builtin_prefetch((const void*)a, 0, 3);
+}
 /* v182b: 70-80 % of SPU DMAs are <= 128 bytes ([DMASTAT]); each went through a variable-size memcpy call into
  * vcruntime140.dll (perf183: 6.5 % of the audio SPU thread in that DLL). Sizes here are already validated (1/2/4/8 or
  * a multiple of 16); the small cases become fixed-size moves (no loop -> clang cannot turn it back into a memcpy call).
@@ -267,6 +294,13 @@ static inline int mfc_do_transfer_fast(spu_context* spu, uint32_t lsa, uint64_t 
         if (dmastat) { st->n_get++; st->b_get += size; }
         { extern int g_cri_video_dma;
           if (spu->image_id == 22 && size > 0x100) g_cri_video_dma = 1; }
+        if (__builtin_expect(g_v246c_dmapf != 0, 0) && (v246c_dmapf_now() & 2)) {   /* v246C stride prefetch */
+            v246c_pf_tls* pt = &g_v246c_pf;
+            const int32_t d = (int32_t)((uint32_t)ea - pt->last_ea);
+            if (d == pt->stride && d != 0 && d >= -65536 && d <= 65536)
+                v246c_pf_range(vm_base + (uint32_t)((uint32_t)ea + (uint32_t)d), size);
+            pt->stride = d; pt->last_ea = (uint32_t)ea;
+        }
         spu_dma_copy(ls_ptr, ea_ptr, size);
         { extern void spu_overlay_note_get(spu_context*, uint32_t, const uint8_t*, uint32_t);
           spu_overlay_note_get(spu, (uint32_t)ea, (const uint8_t*)ls_ptr, size); }
@@ -934,8 +968,22 @@ static inline int mfc_run_list(spu_context* spu, uint32_t elem_lsa,
                                uint32_t num_left, uint32_t dest_lsa,
                                uint64_t ea_base, uint32_t base_cmd, uint32_t tag)
 {
+    /* v246C V246C_DMAPF bit 1: list lookahead prefetch (GET lists only; exact) */
+    const uint32_t v246c_d = (__builtin_expect(g_v246c_dmapf != 0, 0) && mfc_is_get(base_cmd) && vm_base &&
+                              (v246c_dmapf_now() & 1)) ? (uint32_t)g_v246c_dmapf_d : 0u;
+    if (v246c_d)
+        for (uint32_t j = 1; j < v246c_d && j < num_left; j++) {
+            const uint32_t pel = (elem_lsa + j * 8) & SPU_LS_MASK;
+            const uint32_t psz = spu_ls_read32(spu, pel) & 0x7FFF;
+            if (psz) v246c_pf_range(vm_base + spu_ls_read32(spu, pel + 4), psz);
+        }
     for (uint32_t i = 0; i < num_left; i++) {
         uint32_t el = (elem_lsa + i * 8) & SPU_LS_MASK;
+        if (v246c_d && i + v246c_d < num_left) {
+            const uint32_t pel = (elem_lsa + (i + v246c_d) * 8) & SPU_LS_MASK;
+            const uint32_t psz = spu_ls_read32(spu, pel) & 0x7FFF;
+            if (psz) v246c_pf_range(vm_base + spu_ls_read32(spu, pel + 4), psz);
+        }
         uint32_t size_and_flags = spu_ls_read32(spu, el);
         uint32_t eal = spu_ls_read32(spu, el + 4);
 

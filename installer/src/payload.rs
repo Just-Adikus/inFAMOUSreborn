@@ -122,6 +122,31 @@ impl Payload {
         self.len
     }
 
+    /// Every file's forward-slash path, in payload order.
+    pub fn names(&self) -> Result<Vec<String>> {
+        let mut f = File::open(&self.exe)?;
+        let mut pos = self.start;
+        let end = self.start + self.len;
+        let mut out = Vec::new();
+        while pos < end {
+            f.seek(SeekFrom::Start(pos))?;
+            let mut l4 = [0u8; 4];
+            f.read_exact(&mut l4)?;
+            let pl = u32::from_le_bytes(l4) as u64;
+            if pl == 0 || pl > 4096 {
+                bail!("damaged payload");
+            }
+            let mut pb = vec![0u8; pl as usize];
+            f.read_exact(&mut pb)?;
+            let mut l8 = [0u8; 8];
+            f.read_exact(&mut l8)?;
+            let size = u64::from_le_bytes(l8);
+            out.push(String::from_utf8_lossy(&pb).into_owned());
+            pos += 4 + pl + 8 + size;
+        }
+        Ok(out)
+    }
+
     /// Write every file under `dest`; `progress(done_bytes, total_bytes)`.
     pub fn extract(&self, dest: &Path, progress: &mut dyn FnMut(u64, u64)) -> Result<usize> {
         let mut f = File::open(&self.exe)?;
@@ -214,6 +239,7 @@ mod tests {
         assert_eq!(p.read("x/y/b.bin").unwrap().unwrap().len(), 100_000);
         assert_eq!(p.read("a.txt").unwrap().unwrap(), b"hello");
         assert!(p.read("nope").unwrap().is_none());
+        assert_eq!(p.names().unwrap(), vec!["a.txt", "x/y/b.bin", "empty"]);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

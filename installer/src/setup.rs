@@ -547,18 +547,20 @@ pub fn find_source(exe: &Path) -> Result<SourceInfo, String> {
     })
 }
 
-/// Put the port's files into `dest`; `progress(done, total)` in bytes.
+/// Put the port's files into `dest`; `progress(done, total)` in bytes. Returns their paths.
 fn place_files(
     src: &Source,
     dest: &Path,
     progress: &mut dyn FnMut(u64, u64),
-) -> Result<usize, String> {
+) -> Result<Vec<String>, String> {
     match src {
         Source::Embedded(exe) => {
             let pl = payload::Payload::open(exe)
                 .map_err(|e| e.to_string())?
                 .ok_or("this setup program carries no port files")?;
-            pl.extract(dest, progress).map_err(|e| e.to_string())
+            let names = pl.names().map_err(|e| e.to_string())?;
+            pl.extract(dest, progress).map_err(|e| e.to_string())?;
+            Ok(names)
         }
         Source::Checkout { root, files, extra } => {
             let same = util::absolute(root) == util::absolute(dest);
@@ -581,7 +583,7 @@ fn place_files(
                 done += std::fs::metadata(from).map(|m| m.len()).unwrap_or(0);
                 progress(done, total);
             }
-            Ok(list.len())
+            Ok(list.into_iter().map(|(rel, _)| rel).collect())
         }
     }
 }
@@ -856,10 +858,18 @@ fn install(
     std::fs::create_dir_all(&o.location)
         .map_err(|e| format!("can't create {}: {e}", o.location.display()))?;
     set(0.0, "Copying the PC port's files", "");
-    let n = place_files(&o.source, &o.location, &mut |d, t| {
+    let placed = place_files(&o.source, &o.location, &mut |d, t| {
         set(0.03 * d as f32 / t.max(1) as f32, "", "")
     })?;
+    let n = placed.len();
     log(format!("Copied {n} files to {}", o.location.display()));
+    // Remember what the setup put here, so `update` can remove files the repository drops
+    // (without this, an older setup's leftovers stayed forever and broke the first update's build).
+    if let Err(e) = crate::update::record_installed(&o.location, &placed) {
+        log(format!(
+            "note: could not record the installed file list: {e}"
+        ));
+    }
     if stopped() {
         return Err("cancelled".into());
     }

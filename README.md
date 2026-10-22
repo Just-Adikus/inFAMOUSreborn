@@ -60,9 +60,15 @@ maintainer commands.
 
 ## Playing
 
-Run **Play inFamous** (or the inFamous shortcut Setup made). Controllers work as
-on the console, and keyboard and mouse are supported. F10 opens the settings
-menu for vsync, frame cap, resolution and more (saved to `settings.ini`).
+Run **inFamous** (the shortcut Setup made). It opens a small options window first
+(vsync, frame cap, resolution, language and more, saved to `settings.ini`);
+**Play** starts the game. The same settings are in the game's pause menu under
+**Settings**. Controllers work as on the console, and keyboard and mouse are supported.
+
+**F10** opens the in-game trainer: God Mode, Infinite Energy, Refill Health,
+Max Health x2/x5/x10, Add XP, Karma +/-, Kill Enemies / Civilians, Super Speed
+and Player Model (play as Zeke, Trish, Kessler, Alden or John). Set `TRAINER=0`
+to turn it off.
 
 ## How it works
 

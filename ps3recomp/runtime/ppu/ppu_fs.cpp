@@ -154,6 +154,19 @@ static void host_path(char* out, size_t cap, const char* guest)
 #define FS_MAX 256
 static FILE* g_files[FS_MAX];
 static uint8_t g_fd_usm[FS_MAX];
+/* Story-cutscene movies currently open (inFamous: movies/cutscene/*.bik other than the startup splash/logo
+ * videos). The file stays open for exactly as long as the movie plays; rsx_ui_overlay.c hides the pause
+ * watermark while this is non-zero, so it shows in menus and startup videos but not in cutscenes. */
+extern "C" volatile int g_fs_cutscene_open = 0;
+static uint8_t g_fd_cut[FS_MAX];
+static int fs_is_story_cutscene(const char* gpath)
+{
+    const char* d = strstr(gpath, "/movies/cutscene/");
+    if (!d) return 0;
+    const char* name = d + 17;
+    if (!strstr(name, ".bik")) return 0;
+    return strncmp(name, "splash_", 7) != 0 && strncmp(name, "infamous_logo", 13) != 0;
+}
 static char    g_fd_path[FS_MAX][192];   /* guest path per fd (diagnostics) */   /* 1 if this fd is an open .usm movie (read tracker) */
 static DIR*  g_dirs[FS_MAX];
 static char  g_dir_path[FS_MAX][1024];   /* host path per open dir (for readdir stat) */
@@ -228,6 +241,8 @@ static void cellFsOpen(ppu_context* ctx)
     if (fd < 0) { fclose(f); ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
     if (fd_ptr) vm_write32(fd_ptr, (uint32_t)fd);
     g_fd_usm[fd] = (strstr(gpath, ".usm") != nullptr) ? 1 : 0;
+    g_fd_cut[fd] = (uint8_t)fs_is_story_cutscene(gpath);
+    if (g_fd_cut[fd]) g_fs_cutscene_open++;
     /* FS_CALLER=1: name the guest function that opened each file. A title whose
      * streaming layer opens a file and never reads it (You Don't Know Jack's
      * movies) is diagnosed from the opener: its sibling read path is the one
@@ -348,6 +363,7 @@ static void cellFsClose(ppu_context* ctx)
     if (fd >= 0 && fd < FS_MAX && g_files[fd]) {
         if (g_fd_usm[fd] && getenv("PS3_FSLOG_READS")) fprintf(stderr, "[USMRD] CLOSE usm fd=%d\n", fd);
         fclose(g_files[fd]); g_files[fd] = nullptr; g_fd_usm[fd] = 0;
+        if (g_fd_cut[fd]) { g_fd_cut[fd] = 0; if (g_fs_cutscene_open > 0) g_fs_cutscene_open--; }
     }
     ctx->gpr[3] = CELL_OK;
 }

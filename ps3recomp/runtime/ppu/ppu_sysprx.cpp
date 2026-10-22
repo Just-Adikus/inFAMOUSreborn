@@ -508,7 +508,7 @@ std::atomic<long> g_lwc_old_waiters{0};   /* waiters currently parked in the OLD
 std::atomic<long long> s_lws_wait{0}, s_lws_strict{0}, s_lws_sig_wake{0}, s_lws_tmo_wake{0}, s_lws_poll_wake{0},
     s_lws_wait_us{0}, s_lws_sig{0}, s_lws_sig_nowaiter{0}, s_lws_relock_us{0}, s_lws_old{0};
 std::atomic<long long> s_lws_t0{0};
-struct LwsSite { std::atomic<uint32_t> lr{0}; std::atomic<long long> waits{0}, sig{0}, poll{0}; };
+struct LwsSite { std::atomic<uint32_t> lr{0}; std::atomic<long long> waits{0}, sig{0}, poll{0}, mus{0}; };   /* v241C: mus = main-thread (tid 1) wait us */
 LwsSite s_lws_site[16];
 bool lws_enabled()
 {
@@ -600,10 +600,12 @@ void lws_report()
         "[LWCOND-STAT] 10s: %lld waits (%lld strict, %lld in old model), signalled wakes %lld, guest-timeout wakes %lld, poll/fallback wakes %lld, "
         "avg wait %.0f us, lwmutex re-lock avg %.1f us; %lld signals (%lld with no waiter); per-obj %s poll %.2f ms (ab %d) | top sites:",
         w, st, od, sw, tw, pw, w ? (double)us / w : 0.0, w ? (double)rl / w : 0.0, sg, sn, lwc_per_obj() ? "ON" : "off", lwc_poll_us() / 1000.0, g_ab_mask);
-    for (int i = 0; i < 16 && p < (int)sizeof b - 60; i++) {
+    for (int i = 0; i < 16 && p < (int)sizeof b - 100; i++) {
         uint32_t lr = s_lws_site[i].lr.load(); if (!lr) break;
         long long sw2 = s_lws_site[i].waits.exchange(0), ss = s_lws_site[i].sig.exchange(0), sp = s_lws_site[i].poll.exchange(0);
+        const long long mu = s_lws_site[i].mus.exchange(0);   /* v241C */
         if (sw2) p += snprintf(b + p, sizeof b - p, " lr %08X %lld w/%lld sig/%lld poll", lr, sw2, ss, sp);
+        if (sw2 && mu) p += snprintf(b + p, sizeof b - p, "(main %lld ms)", mu / 1000);
     }
     fprintf(stderr, "%s\n", b);
 }
@@ -783,6 +785,7 @@ static void sys_lwcond_wait(ppu_context* ctx)
         }
         const long long t_w1 = lws ? lwc_now_us() : 0;
         if (lws) s_lws_wait_us += t_w1 - t_w0;
+        if (site && ctx->thread_id == 1) site->mus += t_w1 - t_w0;   /* v241C: main-thread share per site */
         if (lwm_fast() && sl->waiters > 0 && lwm_fair()) lwm_yield_to_waiter(sl);   /* v98b */
         InterlockedIncrement(&sl->waiters);
         if (lwm_fast()) lwm_word_lock(sl, INFINITE); else WaitForSingleObject(s, INFINITE);

@@ -100,6 +100,7 @@ static volatile long g_ld_ps1_vram_ready = 0;
 #include <windows.h>
 #include <initguid.h>
 #include <d3d12.h>
+#include "rsx_d3d12_abi.h"   /* struct-returning D3D12 calls for every Windows SDK */
 #include <d3d12sdklayers.h>
 #include <dxgi1_4.h>
 #include <d3dcompiler.h>
@@ -1543,14 +1544,14 @@ static u32 sampler_key(const rsx_dsp_texture* t)
 static D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle(u32 idx)
 {
     D3D12_CPU_DESCRIPTOR_HANDLE h;
-    g.rtv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(g.rtv_heap, &h);
+    RSX_D3D12_CPU_HEAP_START(g.rtv_heap)(g.rtv_heap, &h);
     h.ptr += (size_t)idx * g.rtv_step;
     return h;
 }
 static D3D12_CPU_DESCRIPTOR_HANDLE srv_cpu(u32 slot)
 {
     D3D12_CPU_DESCRIPTOR_HANDLE h;
-    g.srv_cpu_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(g.srv_cpu_heap, &h);
+    RSX_D3D12_CPU_HEAP_START(g.srv_cpu_heap)(g.srv_cpu_heap, &h);
     h.ptr += (size_t)slot * g.srv_step;
     return h;
 }
@@ -1602,7 +1603,7 @@ static D3D12_GPU_DESCRIPTOR_HANDLE srv_table(const u32 slots[SRV_TABLE_SIZE])
     D3D12_CPU_DESCRIPTOR_HANDLE dst;
     D3D12_CPU_DESCRIPTOR_HANDLE src[SRV_TABLE_SIZE];
     const UINT dst_size = SRV_TABLE_SIZE;
-    g.srv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(g.srv_heap, &dst);
+    RSX_D3D12_CPU_HEAP_START(g.srv_heap)(g.srv_heap, &dst);
     dst.ptr += (size_t)base * g.srv_step;
     for (u32 i = 0; i < SRV_TABLE_SIZE; i++)
         src[i] = srv_cpu(slots[i]);
@@ -1610,7 +1611,7 @@ static D3D12_GPU_DESCRIPTOR_HANDLE srv_table(const u32 slots[SRV_TABLE_SIZE])
         g.dev, 1, &dst, &dst_size, SRV_TABLE_SIZE, src, NULL,
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     D3D12_GPU_DESCRIPTOR_HANDLE h;
-    g.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(g.srv_heap, &h);
+    RSX_D3D12_GPU_HEAP_START(g.srv_heap)(g.srv_heap, &h);
     h.ptr += (u64)base * g.srv_step;
     return h;
 }
@@ -1622,7 +1623,7 @@ static int depth_snapshot_descriptors(
         return 0;
     const u32 base = g.srv_ring_used++ * SRV_TABLE_SIZE;
     D3D12_CPU_DESCRIPTOR_HANDLE cpu;
-    g.srv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(
+    RSX_D3D12_CPU_HEAP_START(g.srv_heap)(
         g.srv_heap, &cpu);
     cpu.ptr += (size_t)base * g.srv_step;
     g.dev->lpVtbl->CopyDescriptorsSimple(
@@ -1634,7 +1635,7 @@ static int depth_snapshot_descriptors(
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
     D3D12_GPU_DESCRIPTOR_HANDLE gpu;
-    g.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(
+    RSX_D3D12_GPU_HEAP_START(g.srv_heap)(
         g.srv_heap, &gpu);
     gpu.ptr += (u64)base * g.srv_step;
     *out_source = gpu;
@@ -1645,7 +1646,7 @@ static int depth_snapshot_descriptors(
 static D3D12_CPU_DESCRIPTOR_HANDLE smp_cpu(u32 slot)
 {
     D3D12_CPU_DESCRIPTOR_HANDLE h;
-    g.smp_cpu_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(g.smp_cpu_heap, &h);
+    RSX_D3D12_CPU_HEAP_START(g.smp_cpu_heap)(g.smp_cpu_heap, &h);
     h.ptr += (size_t)slot * g.smp_step;
     return h;
 }
@@ -1665,7 +1666,7 @@ static D3D12_GPU_DESCRIPTOR_HANDLE sampler_table(const u32 slots[SMP_TABLE_SIZE]
     for (u32 i = 0; i < g.smp_ring_used; i++) {
         if (memcmp(g.smp_ring_slots[i], slots, sizeof(g.smp_ring_slots[i])) == 0) {
             D3D12_GPU_DESCRIPTOR_HANDLE cached;
-            g.smp_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(
+            RSX_D3D12_GPU_HEAP_START(g.smp_heap)(
                 g.smp_heap, &cached);
             cached.ptr += (u64)(i * SMP_TABLE_SIZE) * g.smp_step;
             return cached;
@@ -1683,7 +1684,7 @@ static D3D12_GPU_DESCRIPTOR_HANDLE sampler_table(const u32 slots[SMP_TABLE_SIZE]
     D3D12_CPU_DESCRIPTOR_HANDLE dst;
     D3D12_CPU_DESCRIPTOR_HANDLE src[SMP_TABLE_SIZE];
     const UINT dst_size = SMP_TABLE_SIZE;
-    g.smp_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(g.smp_heap, &dst);
+    RSX_D3D12_CPU_HEAP_START(g.smp_heap)(g.smp_heap, &dst);
     dst.ptr += (size_t)base * g.smp_step;
     for (u32 i = 0; i < SMP_TABLE_SIZE; i++)
         src[i] = smp_cpu(slots[i]);
@@ -1691,7 +1692,7 @@ static D3D12_GPU_DESCRIPTOR_HANDLE sampler_table(const u32 slots[SMP_TABLE_SIZE]
         g.dev, 1, &dst, &dst_size, SMP_TABLE_SIZE, src, NULL,
         D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
     D3D12_GPU_DESCRIPTOR_HANDLE h;
-    g.smp_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(g.smp_heap, &h);
+    RSX_D3D12_GPU_HEAP_START(g.smp_heap)(g.smp_heap, &h);
     h.ptr += (u64)base * g.smp_step;
     return h;
 }
@@ -2951,7 +2952,7 @@ static u32 surface_feedback_srv(u32 slot)
     int fresh = 0;
     if (!s->fb_tex) {
         D3D12_RESOURCE_DESC rd;
-        s->tex->lpVtbl->GetDesc(s->tex, &rd);
+        RSX_D3D12_RESOURCE_DESC(s->tex)(s->tex, &rd);
         rd.Flags = D3D12_RESOURCE_FLAG_NONE;
         D3D12_HEAP_PROPERTIES hp = {0};
         hp.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -3218,7 +3219,7 @@ static int honor_zeta_track(void)
 static D3D12_CPU_DESCRIPTOR_HANDLE dsv_handle(u32 slot)
 {
     D3D12_CPU_DESCRIPTOR_HANDLE h;
-    g.dsv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(g.dsv_heap, &h);
+    RSX_D3D12_CPU_HEAP_START(g.dsv_heap)(g.dsv_heap, &h);
     h.ptr += (size_t)slot * g.dsv_step;
     return h;
 }
@@ -7920,7 +7921,7 @@ int rsx_live_draw_init(void* hwnd, u32 width, u32 height,
         if (SUCCEEDED(g.dev->lpVtbl->CreateCommittedResource(g.dev, &dhp, D3D12_HEAP_FLAG_NONE, &drd,
                 D3D12_RESOURCE_STATE_DEPTH_WRITE, &dcv, &IID_ID3D12Resource, (void**)&g.depth))) {
             D3D12_CPU_DESCRIPTOR_HANDLE dh;
-            g.dsv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(g.dsv_heap, &dh);
+            RSX_D3D12_CPU_HEAP_START(g.dsv_heap)(g.dsv_heap, &dh);
             g.dev->lpVtbl->CreateDepthStencilView(g.dev, g.depth, NULL, dh);
         } else {
             g.depth = NULL;

@@ -189,6 +189,15 @@ static inline int coh221_on(void)
     return e && !(g_abx & 0x200000);
 }
 
+/* v243A: per-line store-flag table of the lean lifted-code accessors (ppu_memory_v243.h); see the block at the end. */
+unsigned char g_v243a_stflag[1u << 25];          /* one byte per 128-byte guest line, 32 MiB BSS, touched lazily */
+static volatile int s_v243a_mirror = 0;          /* 1 = spu_coh_reserve mirrors reserved lines into bit0 */
+static inline void v243a_mirror(uint32_t line)
+{
+    if (__builtin_expect(__atomic_load_n(&s_v243a_mirror, __ATOMIC_SEQ_CST) != 0, 0) && !(g_v243a_stflag[line] & 1u))
+        __atomic_fetch_or(&g_v243a_stflag[line], (unsigned char)1u, __ATOMIC_SEQ_CST);
+}
+
 void spu_coh_reserve(spu_context* ctx, uint32_t ea)
 {
     uint32_t line = ea >> SPU_COH_LINE_SHIFT;
@@ -200,7 +209,9 @@ void spu_coh_reserve(spu_context* ctx, uint32_t ea)
     } else {
         s_coh_bitmap[line >> 3] |= (unsigned char)(1u << (line & 7));
         s_coh_armed = 1;
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);   /* v243A: bitmap store before the mirror-flag load (Dekker) */
     }
+    v243a_mirror(line);   /* v243A: before the reservation becomes observable, like the bitmap bit (no-op while off) */
 
     if (!ctx) return;
     int slot = -1;
@@ -386,6 +397,90 @@ void spu_coh_notify_write(uint32_t ea)
         }
       }
     }
+}
+
+
+/* ===========================================================================
+ * v243A (2026-10-20): lean guest accessors for the lifted PPU code -- runtime side.
+ *
+ * ps3recomp/tools/ppu_memacc_v243.py (CMake PORT_PPU_MEMLEAN=AB) gives listed lifted functions a twin whose guest
+ * loads/stores use the helpers of ps3recomp/runtime/ppu/ppu_memory_v243.h: no bounds compare on 8/16/64-bit loads,
+ * immediate compares on 32-bit loads, and ONE byte test per store (g_v243a_stflag[x >> 7]) instead of the bounds
+ * compare + reservation-bitmap bit extraction (+ the 32-bit special-word compare). Those helpers equal the v96b/v156
+ * inline gates only in the runtime's STANDARD fast mode, so the dispatchers run them only after this function has
+ * seen exactly the standard limit values (they then never change: ppu_vm_gate_update() inputs are fixed without
+ * PS3_NULL_SWEEP / SPU_ATOM_EA / DEP_TRACE / the VM_SLOW-style diagnostic envs, all of which make a limit differ).
+ * g_v243a_sel: -1 = undecided (old code; the dispatchers call here), 0 = old code for good,
+ *              1 / 2 = lean code only in even / odd PS3_AB phases (V243A_MEM_PHASE=0 / 1), 3 = lean always (default).
+ * V243A_MEM=0 forces 0. Without the AB build nothing calls this and nothing reads the table (the mirror stays off).
+ * Table bits: bit0 = an SPU reserved the line (set together with s_coh_bitmap: the enable scan copies the bits set so
+ * far, spu_coh_reserve mirrors every later one before the reservation is observable -- Dekker on s_v243a_mirror);
+ * bit1 = every store width goes out of line (null page lines 0..31, the last line: x > 0xFFFFFFF8 wraps);
+ * bit2 = 32-bit stores go out of line (lines >= 0xE0000000, the line of 0xDFFFFFFC, the GCM FIFO-put line).
+ * Any address the old gate sends out of line has its line flagged; the other addresses of a flagged line also go out
+ * of line now, where vm_write* in VM_FAST mode performs the identical plain store. NOTE for future code: anything that
+ * sets s_coh_bitmap bits after start-up outside spu_coh_reserve must also OR bit0 here (infamous_clock_probe.h marks
+ * its lines at ps3_load_prx_modules time, before guest code runs -> covered by the enable scan).
+ * ===========================================================================*/
+volatile int g_v243a_sel = -1;
+static volatile int s_v243a_once = 0;
+extern int      g_vm_fast_inline;                               /* ppu_loader.cpp */
+extern uint64_t g_ppu_ld_lim, g_ppu_st_lim2, g_ppu_vst_lim2, g_ppu_ld32_lim, g_ppu_st32_lim2;
+extern uint32_t ppu_vm_size, ppu_hle_inject_base;
+void v243a_lean_try(void)
+{
+    if (__atomic_load_n(&g_v243a_sel, __ATOMIC_ACQUIRE) >= 0) return;
+    /* vm_fast_init() sets g_vm_fast_inline first and the limits right after: wait until both are visible */
+    if (!__atomic_load_n(&g_vm_fast_inline, __ATOMIC_ACQUIRE) || !__atomic_load_n(&g_ppu_ld_lim, __ATOMIC_ACQUIRE)) return;
+    if (__atomic_exchange_n(&s_v243a_once, 1, __ATOMIC_ACQ_REL)) return;   /* another thread decides; old code meanwhile */
+    const int std = g_ppu_ld_lim == ~0ull && g_ppu_ld32_lim == 0xE0000000ull && g_ppu_st_lim2 == 0xFFFFF000ull &&
+                    g_ppu_vst_lim2 == 0xFFFFF000ull && g_ppu_st32_lim2 == 0xDFFFF000ull && ppu_vm_size == 0 &&
+                    !getenv("PS3_NULL_SWEEP");
+    const char* e = getenv("V243A_MEM");
+    const char* ph = getenv("V243A_MEM_PHASE");
+    const int want = (e && *e == '0') ? 0 : (ph && (*ph == '0' || *ph == '1')) ? 1 + (*ph - '0') : 3;
+    if (!std || !want) {
+        fprintf(stderr, "[v243A] lean guest accessors OFF (%s): ld %llx ld32 %llx st %llx vst %llx st32 %llx vm_size %x\n",
+                !want ? "V243A_MEM=0" : "runtime not in the standard fast mode",
+                (unsigned long long)g_ppu_ld_lim, (unsigned long long)g_ppu_ld32_lim, (unsigned long long)g_ppu_st_lim2,
+                (unsigned long long)g_ppu_vst_lim2, (unsigned long long)g_ppu_st32_lim2, (unsigned)ppu_vm_size);
+        fflush(stderr);
+        __atomic_store_n(&g_v243a_sel, 0, __ATOMIC_RELEASE);
+        return;
+    }
+    __atomic_store_n(&s_v243a_mirror, 1, __ATOMIC_SEQ_CST);      /* from here on spu_coh_reserve mirrors */
+    const uint32_t NL = 1u << 25;
+    for (uint32_t l = 0; l < (0x1000u >> 7); l++) __atomic_fetch_or(&g_v243a_stflag[l], (unsigned char)2u, __ATOMIC_RELAXED);
+    __atomic_fetch_or(&g_v243a_stflag[NL - 1u], (unsigned char)2u, __ATOMIC_RELAXED);
+    __atomic_fetch_or(&g_v243a_stflag[0xDFFFFFFCu >> 7], (unsigned char)4u, __ATOMIC_RELAXED);
+    for (uint32_t l = 0xE0000000u >> 7; l < NL; l++) __atomic_fetch_or(&g_v243a_stflag[l], (unsigned char)4u, __ATOMIC_RELAXED);
+    __atomic_fetch_or(&g_v243a_stflag[(ppu_hle_inject_base + 0x2000u) >> 7], (unsigned char)4u, __ATOMIC_RELAXED);
+    unsigned long copied = 0;
+    for (uint32_t i = 0; i < SPU_COH_BITMAP_SZ; i++) {
+        unsigned b = __atomic_load_n(&s_coh_bitmap[i], __ATOMIC_SEQ_CST);
+        while (b) { unsigned k = (unsigned)__builtin_ctz(b); b &= b - 1u;
+            __atomic_fetch_or(&g_v243a_stflag[i * 8u + k], (unsigned char)1u, __ATOMIC_SEQ_CST); copied++; }
+    }
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    __atomic_store_n(&g_v243a_sel, want, __ATOMIC_RELEASE);
+    fprintf(stderr, "[v243A] lean guest accessors ON (sel %d: %s), %lu reserved lines copied from s_coh_bitmap\n",
+            want, want == 3 ? "always" : want == 1 ? "even PS3_AB phases" : "odd PS3_AB phases", copied);
+    fflush(stderr);
+}
+
+/* v245 PORT_PPU_MEMLEAN=ALL startup gate. Direct lean bodies deliberately have
+ * no old-code twin and no per-call selector, so validate the model once before
+ * dispatching the first guest instruction. Fail closed instead of executing a
+ * direct body with an uninitialised flag table. AB builds retain V243A_MEM=0. */
+int v243a_lean_require(void)
+{
+    v243a_lean_try();
+    const int sel = __atomic_load_n(&g_v243a_sel, __ATOMIC_ACQUIRE);
+    if (sel == 3) return 1;
+    fprintf(stderr, "[v245] PORT_PPU_MEMLEAN=ALL requires the standard fast memory mode; "
+                    "use an AB/OFF build for V243A_MEM=0 or memory diagnostics (selector %d)\n", sel);
+    fflush(stderr);
+    return 0;
 }
 
 #ifdef __cplusplus

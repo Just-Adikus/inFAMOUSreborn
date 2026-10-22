@@ -25,12 +25,19 @@
 #include <string.h>
 #include <stdlib.h>
 #include "rsx_getenv_cache.h"   /* cached getenv() for hot paths (2026-10-04) */
+#ifdef PS3RECOMP_DLSS
+#include "rsx_dlss.h"           /* optional NVIDIA DLAA (DLSS=1), rsx_dlss.cpp */
+/* v243K: per-draw DLSS bookkeeping only when DLSS / FSR (or its probe) is configured -> with it off the FIFO thread
+ * runs exactly the pre-PR path (no qualify test, no draw-info fill, no zeta-vote map, VCB_DEDUP identity unchanged). */
+static int dlss_hooks_on(void) { static int on = -1; if (on < 0) on = rsx_dlss_hooks_on(); return on; }
+#endif
 #include "ps3emu/hz_stats.h"      /* v225A hitch attribution counters */
 #if defined(__SSE4_1__)
 #include <smmintrin.h>   /* v30d: vertex fetch shuffles */
 #include <immintrin.h>   /* v219h: AVX2 index read (read_guest_indices) */
 #endif
 #include <math.h>
+
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -39,6 +46,7 @@
 
 /* D3D12 headers */
 #include <d3d12.h>
+#include "rsx_d3d12_abi.h"   /* struct-returning D3D12 calls for every Windows SDK */
 #include <d3d12sdklayers.h>   /* ID3D12Debug / ID3D12InfoQueue */
 #include <dxgi1_4.h>
 #include <dxgi1_6.h>
@@ -89,6 +97,8 @@ static u32 s_srv_gen = 1;
  *   pipeline key | p4 + no shader disk cache. */
 static int s_bis_nomemo, s_bis_nosrvdd, s_bis_kaddr, s_bis_nodisk, s_bis_literal, s_bis_active;
 static u32 s_frame_no = 1;          /* bumped at the end of every render_frame */
+volatile long g_v244_tex_null = 0, g_v244_tex_noslot = 0;   /* v244 [TEXNULL] counters */
+static int s_cz_units[4]; static float s_cz_slope[4];   /* v244 coarse depth bias table (defined at coarse_bias_level) */
 static u32 s_sf_srv_writes, s_sf_srv_skips;
 static u32 s_sf_zconversions;
 static int ps3_telem_enabled(void)
@@ -595,8 +605,14 @@ static D3D12State s_d3d;
  * attachment allocation and the per-draw viewport already go through. */
 static float s_res_scale = 1.0f;
 static u32   s_bbw = 0, s_bbh = 0;
-#define BBW (s_bbw ? s_bbw : s_d3d.width)
-#define BBH (s_bbh ? s_bbh : s_d3d.height)
+/* DLSS upscaling renders below the output size: RBW x RBH = the internal render size (s_bbw: render targets, depth,
+ * the display buffer), BBW x BBH = the swap chain / window / overlay size (s_outw while upscaling, else the same). */
+static u32   s_outw = 0, s_outh = 0;
+static float s_out_scale = 1.0f;
+#define RBW (s_bbw ? s_bbw : s_d3d.width)
+#define RBH (s_bbh ? s_bbh : s_d3d.height)
+#define BBW (s_outw ? s_outw : RBW)
+#define BBH (s_outh ? s_outh : RBH)
 static void res_scale_dims(u32* w, u32* h)
 {
     if (s_res_scale > 1.0f && s_bbw && *w == s_d3d.width && *h == s_d3d.height) { *w = s_bbw; *h = s_bbh; }
@@ -802,7 +818,7 @@ static int samp_table_get(const u32* keys)
     last = t;
     recent[bucket] = (u16)(t + 1);
     D3D12_CPU_DESCRIPTOR_HANDLE ch;
-    h->lpVtbl->GetCPUDescriptorHandleForHeapStart(h, &ch);
+    RSX_D3D12_CPU_HEAP_START(h)(h, &ch);
     s_samp_off[t] = s_samp_next;
     ch.ptr += (SIZE_T)s_samp_next * s_samp_inc;
     s_samp_next += nd;
@@ -832,6 +848,9 @@ static int samp_table_get(const u32* keys)
                 UINT na = amap[(k >> 16) & 7u];
                 if (fa == 0) na = 1; else if (fa > 0 && (UINT)fa > na) na = (UINT)fa;
                 if (lb && mip) sd.MipLODBias = (float)(int)(signed char)(u8)((k >> 19) & 0xFFu) / 16.0f;
+#ifdef PS3RECOMP_DLSS
+                if (mip) sd.MipLODBias += rsx_dlss_mip_bias();   /* DLAA: NVIDIA's negative texture LOD bias */
+#endif
                 if (na > 1 && mag && mn && mip == 2) {
                     sd.Filter = D3D12_FILTER_ANISOTROPIC;
                     sd.MaxAnisotropy = na;
@@ -1295,6 +1314,12 @@ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
+    case WM_SYSCOMMAND:
+        /* F10 (trainer page) and a lone Alt would otherwise enter the window's keyboard-menu mode, where the next
+         * arrow key opens the system menu and parks this thread in a modal loop.  lp == 0 = menu activated by a key
+         * without a mnemonic; Alt+Space (lp == ' ') and Alt+F4 (SC_CLOSE) still work. */
+        if ((wp & 0xFFF0) == SC_KEYMENU && lp == 0) return 0;
+        break;
     case WM_KEYDOWN:
         /* v155: Esc no longer closes the game (cellPad maps it to Start = pause menu); close with the
          * window's X. ESC_QUITS=1 restores the old behaviour. F1 = borderless fullscreen <-> window. */
@@ -1485,6 +1510,14 @@ static int init_d3d12(u32 width, u32 height)
         return -1;
     }
 
+#ifdef PS3RECOMP_DLSS
+    rsx_dlss_device_init(s_d3d.device, RBW, RBH, BBW, BBH);   /* DLSS=1: start NGX (no-op otherwise) */
+    if (s_outw && !rsx_dlss_active()) {   /* upscaling asked for, but no DLSS here: render at the full size after all */
+        s_bbw = s_outw; s_bbh = s_outh; s_res_scale = s_out_scale; s_outw = s_outh = 0;
+        fprintf(stderr, "[RES] DLSS unavailable: rendering at the output size %ux%u%c", s_bbw, s_bbh, 10);
+    }
+#endif
+
     /* Create swap chain */
     DXGI_SWAP_CHAIN_DESC1 sc_desc = {0};
     sc_desc.Width = BBW;     /* v154 */
@@ -1530,6 +1563,12 @@ static int init_d3d12(u32 width, u32 height)
 
     s_d3d.frame_index = s_d3d.swap_chain->lpVtbl->GetCurrentBackBufferIndex(s_d3d.swap_chain);
 
+#ifdef PS3RECOMP_DLSS
+    /* FSR_FG=1: AMD FSR frame generation replaces the swap chain with its proxy (which presents real + generated frames) */
+    { const int fgw = rsx_dlss_wrap_swapchain((void**)&s_d3d.swap_chain, s_d3d.cmd_queue);
+      if (fgw < 0) { printf("[D3D12] ERROR: no swap chain left after the frame generation wrap\n"); return -1; }
+      if (fgw > 0) s_d3d.frame_index = s_d3d.swap_chain->lpVtbl->GetCurrentBackBufferIndex(s_d3d.swap_chain); }
+#endif
     /* Create RTV descriptor heap */
     D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc = {0};
     rtv_heap_desc.NumDescriptors = FRAME_COUNT;
@@ -1543,7 +1582,7 @@ static int init_d3d12(u32 width, u32 height)
 
     /* Create RTVs for each frame */
     D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle;
-    s_d3d.rtv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.rtv_heap, &rtv_handle);
+    RSX_D3D12_CPU_HEAP_START(s_d3d.rtv_heap)(s_d3d.rtv_heap, &rtv_handle);
 
     for (u32 i = 0; i < FRAME_COUNT; i++) {
         hr = s_d3d.swap_chain->lpVtbl->GetBuffer(
@@ -1611,7 +1650,7 @@ static int init_d3d12(u32 width, u32 height)
         dsv_desc.ViewDimension  = D3D12_DSV_DIMENSION_TEXTURE2D;
 
         D3D12_CPU_DESCRIPTOR_HANDLE dsv_handle;
-        s_d3d.dsv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.dsv_heap, &dsv_handle);
+        RSX_D3D12_CPU_HEAP_START(s_d3d.dsv_heap)(s_d3d.dsv_heap, &dsv_handle);
         s_d3d.device->lpVtbl->CreateDepthStencilView(
             s_d3d.device, s_d3d.depth_buffer, &dsv_desc, dsv_handle);
 
@@ -1922,7 +1961,7 @@ static int init_d3d12(u32 width, u32 height)
                 nv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 nv.Texture2D.MipLevels = 1;
                 D3D12_CPU_DESCRIPTOR_HANDLE hh;
-                s_d3d.srv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &hh);
+                RSX_D3D12_CPU_HEAP_START(s_d3d.srv_heap)(s_d3d.srv_heap, &hh);
                 for (int _i = 0; _i < SRV_HEAP_SIZE; _i++) {
                     s_d3d.device->lpVtbl->CreateShaderResourceView(s_d3d.device, NULL, &nv, hh);
                     hh.ptr += s_d3d.srv_inc;
@@ -4882,6 +4921,11 @@ static ID3D12PipelineState* vp_get_fp_pso_impl(int vs_idx, u32 fp_addr, u32 blen
       static int _cfl = -1; if (_cfl < 0) _cfl = getenv("CULL_FLIP") ? 1 : 0;
       pd.RasterizerState.FrontCounterClockwise =
           (((cull & 4u) ? 1 : 0) ^ _cfl) ? TRUE : FALSE; }
+    { const u32 czl = (cull >> 30) & 3u;   /* v244 coarse-world depth bias (lod_sky_apply / coarse_bias_level) */
+      if (czl) { pd.RasterizerState.DepthBias = s_cz_units[czl]; pd.RasterizerState.SlopeScaledDepthBias = s_cz_slope[czl];
+                 pd.RasterizerState.DepthBiasClamp = 0.0f;
+                 static int _n = 0; if (_n < 4) { _n++; fprintf(stderr, "[COARSEZ] PSO with depth bias %d slope %.1f (level %u)%c",
+                                                         s_cz_units[czl], s_cz_slope[czl], czl, 10); } } }
     /* Blend per the guest's packed key (see rsx_blend_key): dbgfont text needs
      * straight alpha; demosaic's effect passes blend OFF; DeferredShading's
      * light accumulation is additive ONE,ONE. */
@@ -6062,7 +6106,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
     /* A stale cache entry (slot >= 0) re-uses its own slot; otherwise take a
      * free one. Without this the stale path fell through to freeslot and either
      * duplicated the texture into a second slot or bailed when none was free. */
-    if (slot < 0 && freeslot < 0) return -1;      /* out of slots this frame */
+    if (slot < 0 && freeslot < 0) { extern volatile long g_v244_tex_noslot; g_v244_tex_noslot++; return -1; }   /* out of slots this frame (v244: counted, [TEXNULL]) */
     /* TEX_SRCDBG=<N>: is the guest memory this slot uploads FROM actually
      * populated? An empty source and a broken sampler both render flat. */
     { static int cap = -1, n = 0;
@@ -6197,10 +6241,10 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
         if (tp_on()) {   /* v32f: placed in a pool heap */
             D3D12_RESOURCE_ALLOCATION_INFO ai = {0};
             td.Alignment = 4096;   /* small-resource alignment when the driver allows it */
-            s_d3d.device->lpVtbl->GetResourceAllocationInfo(s_d3d.device, &ai, 0, 1, &td);
+            RSX_D3D12_ALLOC_INFO(s_d3d.device)(s_d3d.device, &ai, 0, 1, &td);
             if (ai.Alignment != 4096) {
                 td.Alignment = 0;
-                s_d3d.device->lpVtbl->GetResourceAllocationInfo(s_d3d.device, &ai, 0, 1, &td);
+                RSX_D3D12_ALLOC_INFO(s_d3d.device)(s_d3d.device, &ai, 0, 1, &td);
             }
             u32 pg = 0, np = 0;
             int ph = (ai.SizeInBytes && ai.SizeInBytes != ~0ull)
@@ -6634,7 +6678,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
     sv.Shader4ComponentMapping = (basef == 0x81) ? 0x1000 : D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.Texture2D.MipLevels = _nlev;   /* v146 */
     D3D12_CPU_DESCRIPTOR_HANDLE sh;
-    s_d3d.srv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &sh);
+    RSX_D3D12_CPU_HEAP_START(s_d3d.srv_heap)(s_d3d.srv_heap, &sh);
     sh.ptr += (u64)(VPTEX_SRV_BASE + slot) * s_d3d.srv_inc;
     if (cube) {
         sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
@@ -6988,10 +7032,52 @@ static void ps3_guest_memdump(void)
             (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart, 10);
 }
 
+/* v244 LOD_COARSE_LEVEL / LOD_COARSE_BIAS / LOD_COARSE_CTL: depth bias for the coarse-world pass (the fph 98123110 /
+ * 9A50E9FB "colour = tex0 * const into the light buffer" draws that lod_sky_apply classifies). rsxcap 2026-10-21:
+ * the DETAILED buildings are in the G-buffer, but the coarse stand-ins drawn afterwards
+ * pass LEQUAL in front of them (their hulls sit on/just in front of the real facades) and write their flat texture
+ * into the light buffer -> see-through grey/black "ghost" buildings. A depth bias pushes only the stand-ins back:
+ * they lose where a real building occupies the pixel but still win where they are genuinely in front (the far bridge
+ * that the v147 sky-only mask punched holes into). Level 0 = off, 1..3 = LOD_COARSE_BIAS "u1:s1,u2:s2,u3:s3"
+ * (D24 units : slope scale). LOD_COARSE_CTL=<file> = a level digit re-read every 30 frames (bench A/B).
+ * The level rides in cull bits 30-31, so each level is its own PSO. Log [COARSEZ]. */
+static int s_cz_units[4] = { 0, 2048, 8192, 32768 };
+static float s_cz_slope[4] = { 0.0f, 1.0f, 2.0f, 4.0f };
+/* v244b LOD_COARSE_ZMAX (default 0.9999): the biased stand-ins get viewport MaxDepth = this. D3D12 clamps the biased
+ * depth to the viewport range, so a far stand-in can never be pushed behind the sky dome (bench v244cz angle 4: the
+ * unclamped levels 2/3 erased the far skyline / bridge statues) while it still loses to a real facade at its pixel. */
+static float s_cz_zmax = 0.9999f;
+static int coarse_bias_level(void)
+{
+    static int lvl = -1; static const char* ctl = NULL; static u32 last = 0xFFFFFFFFu;
+    if (lvl < 0) {
+        const char* e = getenv("LOD_COARSE_LEVEL"); lvl = (e && *e) ? atoi(e) : 0; if (lvl < 0 || lvl > 3) lvl = 0;
+        const char* b = getenv("LOD_COARSE_BIAS");
+        for (int i = 1; i <= 3 && b && *b; i++) {
+            int u = 0; float sl = 0.0f;
+            if (sscanf(b, "%d:%f", &u, &sl) >= 1) { s_cz_units[i] = u; s_cz_slope[i] = sl; }
+            b = strchr(b, ','); if (b) b++;
+        }
+        ctl = getenv("LOD_COARSE_CTL"); if (ctl && !*ctl) ctl = NULL;
+        { const char* z = getenv("LOD_COARSE_ZMAX"); if (z && *z) { float v = (float)atof(z); if (v > 0.5f && v <= 1.0f) s_cz_zmax = v; } }
+        fprintf(stderr, "[COARSEZ] v244 coarse-world depth bias level %d (1: %d/%.1f, 2: %d/%.1f, 3: %d/%.1f D24 units/slope), zmax %.6f%s%c",
+                lvl, s_cz_units[1], s_cz_slope[1], s_cz_units[2], s_cz_slope[2], s_cz_units[3], s_cz_slope[3], s_cz_zmax,
+                ctl ? " -- LOD_COARSE_CTL file overrides" : "", 10);
+    }
+    if (ctl && s_frame_no / 30u != last) {
+        last = s_frame_no / 30u;
+        FILE* f = fopen(ctl, "rb");
+        if (f) { int c = fgetc(f); fclose(f);
+                 if (c >= '0' && c <= '3' && c - '0' != lvl) { lvl = c - '0'; fprintf(stderr, "[COARSEZ] ctl -> level %d%c", lvl, 10); } }
+    }
+    return lvl;
+}
 static void lod_sky_apply(D3D12DrawRecord* dr, const u8* uc)
 {
     const int lsk_mode = lod_sky_on();
-    if (!lsk_mode || (lsk_mode == 1 && !dbt_on()) || !uc || dr->blend || !dr->is_vp) return;
+    const int lsk_use = lsk_mode && !(lsk_mode == 1 && !dbt_on());
+    const int cz = coarse_bias_level();   /* v244 */
+    if ((!lsk_use && !cz) || !uc || dr->blend || !dr->is_vp) return;
     if ((dr->cull & 0x8300u) != 0x8300u) return;            /* guest depth present, test + write */
     if ((dr->cull >> 24) & 1u) return;                        /* the guest already bounds it */
     extern int rsx_fp_decompile_ex(const u8*, u32, u32, u32, char*, u32);
@@ -7015,7 +7101,9 @@ static void lod_sky_apply(D3D12DrawRecord* dr, const u8* uc)
             fprintf(stderr, "[LODSKY] fp=0x%X (fph %08X): coarse-world pass -> only where stored depth is far%c",
                     dr->fp_addr, dr->fp_uh, 10); }
     }
-    if (is) {
+    if (is && cz) { dr->cull |= (u32)cz << 30;   /* v244 coarse depth bias level (PSO key) */
+                    if (!(dr->zmax <= s_cz_zmax)) dr->zmax = s_cz_zmax; }   /* v244b: never behind the sky */
+    if (is && lsk_use) {
         u32 si = (lsk_mode == 2 && !s_lsk_broken && zs_on() && dr->zeta_off && !((dr->cull >> 16) & 0xFFu)) ? lsk_stencil_idx() : 0u;
         if (si) {   /* v147: sky-region stencil mask (lsk_mark runs before the coarse run) */
             dr->cull = (dr->cull & ~0x00FF0000u) | (si << 16);
@@ -7291,6 +7379,14 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
                 s_fl_hit = s_fl_wr = 0; }
         }
     }
+#ifdef PS3RECOMP_DLSS
+    /* DLAA: does this draw rasterize the main scene (full-size target + depth, depth test on)? Such draws get the
+     * frame's sub-pixel jitter in the epilogue below, so it is part of the VCB_DEDUP identity. */
+    const int dlss_q = (dr && dlss_hooks_on()) ? rsx_dlss_draw_qualifies(st->depth_test_enable, dr->zeta_off, dr->zw, dr->zh, dr->rt_off,
+                                                    dr->rt_w, dr->rt_h, dr->vp_w, dr->vp_h, s_d3d.width, s_d3d.height) : 0;
+#else
+    const int dlss_q = 0;
+#endif
     {   /* v219g VCB_DEDUP (default 1; 0 = off; ABX 0x8000000 = off for in-run A/B): skip writing this draw's VP
          * constant slot when it would be byte-identical to the last slot written in this batch -- same VS entry (same
          * used-constant mask), no constant written since (rsx_state.vertex_constants_dirty, set by every
@@ -7302,6 +7398,7 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
         static int dd = -1;
         static u32 s_vcb_slot = 0, s_vcb_frame = 0xFFFFFFFFu; static int s_vcb_par = -1, s_vcb_vs = -9;
         static const void* s_vcb_ve = NULL; static u32 s_vcb_hash = 0; static float s_vcb_z[4]; static u64 s_vcb_hit = 0, s_vcb_full = 0; static u32 s_vcb_rep = 0;
+        static int s_vcb_dq = -1;   /* DLAA jitter flag of the last full slot */
         if (s_vcb_cmp < 0) { const char* c = getenv("VCB_CMP"); s_vcb_cmp = (c && *c == '1') ? 1 : 0; }
         if (dd < 0) { const char* e = getenv("VCB_DEDUP"); dd = (e && *e == '0') ? 0 : 1;
             if (getenv("VP_MVP") || getenv("RSX_DBG_CB") || getenv("DBG_ZOOM") || getenv("VPC_DUMP_FP") || getenv("VPC_DUMP_VS") ||
@@ -7314,7 +7411,7 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
         extern volatile int g_abx;
         if (dd && dr && !(g_abx & 0x8000000) && ve0 && s_vcb_ve == (const void*)ve0 && s_vcb_hash == ve0->hash && s_vcb_vs == vs_idx &&
             slot > s_vcb_slot && s_vcb_frame == s_frame_no && s_vcb_par == s_d3d.vp_parity &&
-            !memcmp(zin, s_vcb_z, sizeof zin) &&
+            !memcmp(zin, s_vcb_z, sizeof zin) && s_vcb_dq == dlss_q &&
             (!cchg || (s_vcb_cmp > 0 && s_vcb_sh_ok && ve0->cvalid && !ve0->crel && !(g_abx & 0x40000000) && vcb_runs_equal(ve0, st)))) {   /* v219m: equal re-sent constants (VCB_CMP=1) */
             ((D3D12DrawRecord*)dr)->vcb_slot = s_vcb_slot;
             s_vcb_hit++;
@@ -7327,6 +7424,7 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
         s_vcb_full++;
         s_vcb_slot = slot; s_vcb_frame = s_frame_no; s_vcb_par = s_d3d.vp_parity; s_vcb_vs = vs_idx; s_vcb_ve = ve0; s_vcb_hash = ve0 ? ve0->hash : 0;
         memcpy(s_vcb_z, zin, sizeof zin);
+        s_vcb_dq = dlss_q;
     }
     char* dst = (char*)s_d3d.vp_cb_mapped
         + ((u64)s_d3d.vp_parity * s_max_draws + slot) * VP_CB_STRIDE;
@@ -7449,6 +7547,26 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
                if (lock < 0) { const char* le = getenv("DBG_LOCK"); lock = le ? atoi(le) : 0; }
                if (lock && s_lock_valid) { ux = s_lock_x; uy = s_lock_y; }
                vpx[0] = k; vpx[1] = k; vpx[4] = -ux * k; vpx[5] = -uy * k; } }
+
+#ifdef PS3RECOMP_DLSS
+    if (dr && dlss_hooks_on()) {   /* DLAA: camera tracking / probe see the unjittered epilogue, then the scene draws get the jitter */
+        const VPVSEntry* dve = (vs_idx >= 0 && vs_idx < s_d3d.vp_vs_n) ? &s_d3d.vp_vs[vs_idx] : NULL;
+        rsx_dlss_draw_info di;
+        di.frame = s_frame_no; di.rec_index = slot; di.vs_idx = vs_idx; di.vs_hash = dve ? dve->hash : 0;
+        di.vs_src = dve ? dve->src : NULL; di.cuse = (dve && dve->cvalid && !dve->crel) ? dve->cuse : NULL;
+        di.consts = (const float*)st->vertex_constants;
+        di.rt_off = dr->rt_off; di.rt_w = dr->rt_w; di.rt_h = dr->rt_h; di.zeta_off = dr->zeta_off; di.zw = dr->zw; di.zh = dr->zh;
+        di.vp_x = dr->vp_x; di.vp_y = dr->vp_y; di.vp_w = dr->vp_w; di.vp_h = dr->vp_h;
+        di.fp_addr = dr->fp_addr; di.vcount = dr->vertex_count; di.color_target = st->color_target;
+        di.mrt = (dr->rt_mrt[0] ? 1u : 0u) + (dr->rt_mrt[1] ? 1u : 0u) + (dr->rt_mrt[2] ? 1u : 0u);
+        di.depth_test = st->depth_test_enable; di.depth_mask = st->depth_mask; di.blend = dr->blend;
+        di.posscale[0] = vpx[0]; di.posscale[1] = vpx[1]; di.posscale[2] = vpx[2];
+        di.posoffset[0] = vpx[4]; di.posoffset[1] = vpx[5]; di.posoffset[2] = vpx[6];
+        di.guest_w = s_d3d.width; di.guest_h = s_d3d.height;
+        rsx_dlss_note_draw(&di, dlss_q);
+        if (dlss_q) rsx_dlss_jitter_ndc(&vpx[4], &vpx[5]);
+    }
+#endif
 
     /* VPC_DUMP_FP=<hex fp>: for the first 3 draws using that fragment program,
      * print the vertex constants a world*viewproj VP reads (c256..c269, c464..c467),
@@ -7776,7 +7894,7 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt)
     }
 
     D3D12_CPU_DESCRIPTOR_HANDLE rh;
-    s_d3d.rt_rtv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.rt_rtv_heap, &rh);
+    RSX_D3D12_CPU_HEAP_START(s_d3d.rt_rtv_heap)(s_d3d.rt_rtv_heap, &rh);
     rh.ptr += (u64)slot * s_d3d.device->lpVtbl->GetDescriptorHandleIncrementSize(
         s_d3d.device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     s_d3d.device->lpVtbl->CreateRenderTargetView(s_d3d.device, r->res, NULL, rh);
@@ -7787,7 +7905,7 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt)
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.Texture2D.MipLevels = 1;
     D3D12_CPU_DESCRIPTOR_HANDLE sh;
-    s_d3d.srv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &sh);
+    RSX_D3D12_CPU_HEAP_START(s_d3d.srv_heap)(s_d3d.srv_heap, &sh);
     sh.ptr += (u64)(RT_SRV_BASE + slot) * s_d3d.srv_inc;
     s_d3d.device->lpVtbl->CreateShaderResourceView(s_d3d.device, r->res, &sv, sh);
 
@@ -7801,7 +7919,7 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt)
 static D3D12_CPU_DESCRIPTOR_HANDLE off_rt_rtv(int slot)
 {
     D3D12_CPU_DESCRIPTOR_HANDLE rh;
-    s_d3d.rt_rtv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.rt_rtv_heap, &rh);
+    RSX_D3D12_CPU_HEAP_START(s_d3d.rt_rtv_heap)(s_d3d.rt_rtv_heap, &rh);
     rh.ptr += (u64)slot * s_d3d.device->lpVtbl->GetDescriptorHandleIncrementSize(
         s_d3d.device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     return rh;
@@ -7840,7 +7958,7 @@ static void srv_write_ex(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt,
         sv.TextureCube.ResourceMinLODClamp = 0.0f;
     }
     D3D12_CPU_DESCRIPTOR_HANDLE h;
-    s_d3d.srv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &h);
+    RSX_D3D12_CPU_HEAP_START(s_d3d.srv_heap)(s_d3d.srv_heap, &h);
     h.ptr += (u64)heap_slot * s_d3d.srv_inc;
     s_d3d.device->lpVtbl->CreateShaderResourceView(s_d3d.device, res, &sv, h);
 }
@@ -7869,7 +7987,7 @@ static ID3D12Resource* off_rt_feedback_get(int slot)
     OffRT* r = &s_d3d.off_rt[slot];
     if (r->feedback) return r->feedback;
     D3D12_RESOURCE_DESC td;
-    r->res->lpVtbl->GetDesc(r->res, &td);
+    RSX_D3D12_RESOURCE_DESC(r->res)(r->res, &td);
     td.Flags = D3D12_RESOURCE_FLAG_NONE;
     D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
     HRESULT hr = s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device,
@@ -7956,7 +8074,7 @@ static int zs_find_off(u32 off, u32 w, u32 h)
 static D3D12_CPU_DESCRIPTOR_HANDLE zs_dsv(int i)
 {
     D3D12_CPU_DESCRIPTOR_HANDLE h;
-    s_zs_dsv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_zs_dsv_heap, &h);
+    RSX_D3D12_CPU_HEAP_START(s_zs_dsv_heap)(s_zs_dsv_heap, &h);
     h.ptr += (u64)i * s_zs_dsv_inc;
     return h;
 }
@@ -8052,7 +8170,7 @@ static int zs_get(u32 off, u32 w, u32 h)
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.Texture2D.MipLevels = 1;
     D3D12_CPU_DESCRIPTOR_HANDLE sh;
-    s_d3d.srv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &sh);
+    RSX_D3D12_CPU_HEAP_START(s_d3d.srv_heap)(s_d3d.srv_heap, &sh);
     sh.ptr += (u64)(ZS_SRV_BASE + (u32)slot * RSX_D3D_TEX_UNITS) * s_d3d.srv_inc;
     s_d3d.device->lpVtbl->CreateShaderResourceView(s_d3d.device, r, &sv, sh);
     {   /* v156 ZCONV_STENCIL: window slot t1 = the stencil plane (read by the depth->colour copy) */
@@ -8281,7 +8399,7 @@ static void zs_convert(int i, int crt)
     cmd_rect(&vp, &sc);
     cmd_pso(s_zconv_pso);
     D3D12_GPU_DESCRIPTOR_HANDLE g;
-    s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &g);
+    RSX_D3D12_GPU_HEAP_START(s_d3d.srv_heap)(s_d3d.srv_heap, &g);
     g.ptr += (u64)(ZS_SRV_BASE + (u32)i * RSX_D3D_TEX_UNITS) * s_d3d.srv_inc;
     s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 1, g);
     s_d3d.cmd_list->lpVtbl->IASetPrimitiveTopology(s_d3d.cmd_list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -8599,6 +8717,46 @@ static double hz_hitch_ms(void) { if (s_hz_hitch_ms < 0) { s_hz_hitch_ms = (doub
 enum { HC_GPU, HC_RCPU, HC_PSO, HC_TEX, HC_VS, HC_IO, HC_TW, HC_GUEST, HC_FIFO, HC_N };
 static const char* const s_hc_name[HC_N] = { "gpu", "rcpu", "pso", "tex", "vs", "io", "tw", "guest", "fifo" };
 static int hz_cmp_f(const void* a, const void* b) { const float x = *(const float*)a, y = *(const float*)b; return x < y ? -1 : x > y; }
+/* v243C RFBOUND=1 (default off): is a frame bound by the main guest thread or by the RSX side? Per world frame:
+ * main-thread fence-poll wait (cellGcmSys.c g_v243c_fence_qpc, by FIFO-thread state), FIFO waits for the render
+ * thread / the GPU, render-thread exec CPU / GPU wait / idle. Classes: main = the main thread did not wait on the
+ * RSX fence (< 0.5 ms); rsx-direct = it waited >= 0.5 ms while the FIFO thread itself was blocked on the render
+ * thread or the GPU (>= 0.5 ms of the wait); fifo-walk = it waited while the FIFO thread was walking (incl. walking
+ * late because of an earlier GPU wait). rf-sat = render thread idle < 0.5 ms (its cycle fills the frame). */
+static void v243c_rfbound_frame(double frame_ms, double rf_ms, double gpu_ms, double idle, double fw, double fg, double tw)
+{
+    extern volatile long long g_v243c_fence_qpc[8]; extern int v243c_rfbound_on(void);
+    extern volatile int g_abx, g_ab_phase;
+    if (!v243c_rfbound_on()) return;
+    static LARGE_INTEGER qf; static long long last[8]; static int init = 0, n = 0, nM = 0, nD = 0, nF = 0, nS = 0;
+    static double a[12];
+    if (!qf.QuadPart) QueryPerformanceFrequency(&qf);
+    double q[8], fence = 0;
+    for (int k = 0; k < 8; k++) { const long long v = g_v243c_fence_qpc[k]; q[k] = (double)(v - last[k]) * 1000.0 / (double)qf.QuadPart; last[k] = v; fence += q[k]; }
+    if (!init) { init = 1; return; }
+    const double qr = q[5] + q[6];
+    if (fence < 0.5) nM++; else if (qr >= 0.5) nD++; else nF++;
+    if (idle < 0.5) nS++;
+    const double v[12] = { frame_ms, fence, q[2], q[5], q[6], q[1] + q[3] + q[4] + q[0] + q[7], fw, fg, rf_ms, gpu_ms, idle, tw };
+    for (int k = 0; k < 12; k++) a[k] += v[k];
+    if (++n == 300) {
+        fprintf(stderr, "[RFBOUND] v243C 300 world frames: main-bound %d | rsx-direct %d | fifo-walk %d | rf-saturated %d | means ms: frame %.2f"
+                        " fence %.2f (walk %.2f rf %.2f gpu %.2f other %.2f) fifo-wait rf %.2f gpu %.2f | rf exec %.2f gpuwait %.2f idle %.2f | tw(all) %.2f | abx 0x%X phase %d%c",
+                nM, nD, nF, nS, a[0] / n, a[1] / n, a[2] / n, a[3] / n, a[4] / n, a[5] / n, a[6] / n, a[7] / n, a[8] / n, a[9] / n, a[10] / n, a[11] / n,
+                (unsigned)g_abx, (int)g_ab_phase, 10);
+        n = nM = nD = nF = nS = 0; memset(a, 0, sizeof a);
+        {   /* v243C RFBOUND2: the walker's side of the fence wait (cellGcmSys.c g_v243c_st) */
+            extern volatile long long g_v243c_st[16]; static long long l2[16];
+            long long d2[16]; for (int k = 0; k < 16; k++) { d2[k] = g_v243c_st[k] - l2[k]; l2[k] = g_v243c_st[k]; }
+            const double ms = 1000.0 / (double)qf.QuadPart;
+            fprintf(stderr, "[RFBOUND2] v243C per frame: %.1f put stores, %.2f fence waits (backlog %.1f KB, %.2f ms after the last put), ACQUIRE spins %.2f = %.3f ms (%.3f ms while main waits)%c",
+                    d2[0] / 300.0, d2[1] / 300.0, d2[1] ? d2[2] / 1024.0 / d2[1] : 0.0, d2[1] ? d2[3] * ms / d2[1] : 0.0,
+                    d2[6] / 300.0, d2[4] * ms / 300.0, d2[5] * ms / 300.0, 10);
+            fprintf(stderr, "[RFBOUND3] v243C walker per put: %.2f puts drained/frame, put -> drained %.2f ms, inside the FIFO walk %.2f ms%c",
+                    d2[10] / 300.0, d2[10] ? d2[8] * ms / d2[10] : 0.0, d2[10] ? d2[9] * ms / d2[10] : 0.0, 10);
+        }
+    }
+}
 static void hz_frame_report(double frame_ms, double rf_ms, double gpu_ms, u32 draws, LARGE_INTEGER now, LARGE_INTEGER f)
 {
     static int inited = 0, spike_ms = 25, spike_max = 400, nspk = 0; static u32 pos_ea = 0;
@@ -8634,6 +8792,7 @@ static void hz_frame_report(double frame_ms, double rf_ms, double gpu_ms, u32 dr
     const double io = (d[HZ_FS_MAIN_TSC] + d[HZ_FIOS_MAIN_TSC]) * tms;
     double rcpu = rf_ms - pso - tex; if (rcpu < 0) rcpu = 0;
     double idle = frame_ms - gpu_ms - rf_ms; if (idle < 0) idle = 0;
+    v243c_rfbound_frame(frame_ms, rf_ms, gpu_ms, idle, fw, fg, tw);   /* v243C RFBOUND (no-op unless RFBOUND=1) */
     double c[HC_N]; c[HC_GPU] = gpu_ms; c[HC_RCPU] = rcpu; c[HC_PSO] = pso; c[HC_TEX] = tex; c[HC_VS] = vs; c[HC_IO] = io; c[HC_TW] = tw;
     c[HC_GUEST] = gmax; c[HC_FIFO] = idle;
     int cls = -1;
@@ -9272,7 +9431,7 @@ static void render_frame_exec(void)
                 sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 sv.Texture2D.MipLevels = 1;
                 D3D12_CPU_DESCRIPTOR_HANDLE sh;
-                s_d3d.srv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &sh);
+                RSX_D3D12_CPU_HEAP_START(s_d3d.srv_heap)(s_d3d.srv_heap, &sh);
                 s_d3d.device->lpVtbl->CreateShaderResourceView(s_d3d.device, s_d3d.tex_resource, &sv, sh);
 
                 s_d3d.tex_ready = 1;
@@ -9788,6 +9947,16 @@ static void render_frame_exec(void)
                     }
                 }
             }
+            /* v244 [TEXNULL]: count texture units the game set that end up NULL (= a solid black object), reported
+             * every 600 frames together with the out-of-slots count -- the background "black buildings" hunt.
+             * Always on; costs one increment on the (rare) null path. */
+            if (dr->tex[_u].set) {
+                extern volatile long g_v244_tex_null, g_v244_tex_noslot;
+                static u32 rep = 0; g_v244_tex_null++;
+                if (s_frame_no / 600u != rep) { rep = s_frame_no / 600u;
+                    fprintf(stderr, "[TEXNULL] v244 last ~600 frames: %ld set texture units bound NULL (black), %ld uploads out of slots%c",
+                            g_v244_tex_null, g_v244_tex_noslot, 10);
+                    g_v244_tex_null = 0; g_v244_tex_noslot = 0; } }
             /* TEX_BINDDBG=<N>: a unit that ends up with a NULL SRV. The draw is
              * still recorded, lit and transformed -- it just samples nothing,
              * which renders as a solid black object. */
@@ -9869,12 +10038,12 @@ static void render_frame_exec(void)
 
     /* Get RTV handle for current frame */
     D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle;
-    s_d3d.rtv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.rtv_heap, &rtv_handle);
+    RSX_D3D12_CPU_HEAP_START(s_d3d.rtv_heap)(s_d3d.rtv_heap, &rtv_handle);
     rtv_handle.ptr += fi * s_d3d.rtv_descriptor_size;
 
     /* Get DSV handle (single depth buffer shared across frames) */
     D3D12_CPU_DESCRIPTOR_HANDLE dsv_handle;
-    s_d3d.dsv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.dsv_heap, &dsv_handle);
+    RSX_D3D12_CPU_HEAP_START(s_d3d.dsv_heap)(s_d3d.dsv_heap, &dsv_handle);
 
     if (perf_on()) s_perf_pre += perf_now() - _pre0;
     rft_mark(RFT_PRE);
@@ -9905,7 +10074,7 @@ static void render_frame_exec(void)
             ID3D12DescriptorHeap* heaps[] = { s_d3d.srv_heap };
             s_d3d.cmd_list->lpVtbl->SetDescriptorHeaps(s_d3d.cmd_list, 1, heaps);
             D3D12_GPU_DESCRIPTOR_HANDLE gh;
-            s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &gh);
+            RSX_D3D12_GPU_HEAP_START(s_d3d.srv_heap)(s_d3d.srv_heap, &gh);
             s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 1, gh);
         }
 
@@ -10034,12 +10203,12 @@ static void render_frame_exec(void)
             ID3D12DescriptorHeap* heaps[] = { s_d3d.srv_heap, s_d3d.samp_heap };
             s_d3d.cmd_list->lpVtbl->SetDescriptorHeaps(s_d3d.cmd_list, s_d3d.samp_heap ? 2 : 1, heaps);
             D3D12_GPU_DESCRIPTOR_HANDLE gh;
-            s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &gh);
+            RSX_D3D12_GPU_HEAP_START(s_d3d.srv_heap)(s_d3d.srv_heap, &gh);
             s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 1, gh);
             D3D12_GPU_DESCRIPTOR_HANDLE samp_base = {0};
             int cur_samp = -1;
             if (s_d3d.samp_heap) {
-                s_d3d.samp_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.samp_heap, &samp_base);
+                RSX_D3D12_GPU_HEAP_START(s_d3d.samp_heap)(s_d3d.samp_heap, &samp_base);
                 s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 3, samp_base);
                 cur_samp = 0;
             }
@@ -10054,7 +10223,7 @@ static void render_frame_exec(void)
             vbv.StrideInBytes  = 256;   /* 16 float4 attrib slots */
             s_d3d.cmd_list->lpVtbl->IASetVertexBuffers(s_d3d.cmd_list, 0, 1, &vbv);
             D3D12_GPU_DESCRIPTOR_HANDLE gh_base;
-            s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &gh_base);
+            RSX_D3D12_GPU_HEAP_START(s_d3d.srv_heap)(s_d3d.srv_heap, &gh_base);
             /* The record side already interns SRV windows and reuses identical
              * VP/FP constant slots. Carry that information through to the
              * command list: setting an unchanged root table/CBV is still a
@@ -10081,6 +10250,10 @@ static void render_frame_exec(void)
             double _rec0 = perf_on() ? perf_now() : 0.0;
             int seen_small_vp = 0, captured = 0;
             gq_mark(GQ_VPBEGIN);   /* v199 */
+#ifdef PS3RECOMP_DLSS
+            const u32 dlss_last_scene = rsx_dlss_exec_last_scene_draw();   /* DLAA: copy the scene depth after this draw */
+            const u32 dlss_composite = rsx_dlss_exec_composite_draw();     /* ... and the HUD-less image after this one */
+#endif
             for (u32 d = 0; d < s_rf_count && d < MAX_DRAWS; d++) {
                 const D3D12DrawRecord* dr = &s_rf_draws[d];
                 if (!dr->is_vp) continue;
@@ -10510,6 +10683,23 @@ static void render_frame_exec(void)
                             s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list, dr->vertex_count, 1, 0, 0);
                     }
                 }
+#ifdef PS3RECOMP_DLSS
+                if (d == dlss_last_scene && cur_zs >= 0 && s_zs[cur_zs].res) {   /* scene complete: its depth for DLAA */
+                    u32 zst = (u32)s_zs[cur_zs].st;
+                    rsx_dlss_capture_depth(s_d3d.cmd_list, s_zs[cur_zs].res, &zst);
+                    s_zs[cur_zs].st = (D3D12_RESOURCE_STATES)zst;
+                }
+                if (d == dlss_composite) {   /* post-processed scene on the display buffer, HUD not drawn yet */
+                    if (cur_rt >= 0 && cur_rt < MAX_OFF_RTS && s_d3d.off_rt[cur_rt].res) {
+                        u32 rst = (u32)s_d3d.off_rt[cur_rt].st;
+                        rsx_dlss_capture_color(s_d3d.cmd_list, s_d3d.off_rt[cur_rt].res, &rst);
+                        s_d3d.off_rt[cur_rt].st = (D3D12_RESOURCE_STATES)rst;
+                    } else if (cur_rt == -1) {
+                        u32 rst = (u32)D3D12_RESOURCE_STATE_RENDER_TARGET;
+                        rsx_dlss_capture_color(s_d3d.cmd_list, s_d3d.render_targets[fi], &rst);
+                    }
+                }
+#endif
                 /* Conversion stores depth only, not stencil. Read-only particles
                  * must not force a full-screen conversion before the next particle. */
                 if (cur_zs >= 0 && (!(dr->cull & 0x8000u) || (dr->cull & 0x300u) == 0x300u))
@@ -10574,7 +10764,7 @@ static void render_frame_exec(void)
               if (s_df && fo) {
                   for (int _k = 0; _k < MAX_OFF_RTS; _k++)
                       if (s_d3d.off_rt[_k].res && s_d3d.off_rt[_k].off == fo &&
-                          s_d3d.off_rt[_k].w == BBW && s_d3d.off_rt[_k].h == BBH) {
+                          s_d3d.off_rt[_k].w == RBW && s_d3d.off_rt[_k].h == RBH) {
                           /* v62b: only if this frame actually drew into it -- a flipped buffer
                            * we never drew this frame showed a black screen entering the world */
                           if (_k < 64 && (disp_drawn >> _k) & 1ull) last_disp_slot = _k;
@@ -10584,8 +10774,17 @@ static void render_frame_exec(void)
               } }
             s_bp_last_slot = last_disp_slot; s_bp_last_drawn = disp_drawn;   /* v103A [BLACK]: the buffer presented */
             if (last_disp_slot >= 0 && s_d3d.off_rt[last_disp_slot].res &&
-                s_d3d.off_rt[last_disp_slot].w == BBW && s_d3d.off_rt[last_disp_slot].h == BBH &&
+                s_d3d.off_rt[last_disp_slot].w == RBW && s_d3d.off_rt[last_disp_slot].h == RBH &&
                 s_d3d.off_rt[last_disp_slot].dxgi == (u32)DXGI_FORMAT_R8G8B8A8_UNORM) {
+#ifdef PS3RECOMP_DLSS
+              if (rsx_dlss_upscaling()) {   /* DLSS upscaling: the display buffer (render size) goes to DLSS, which fills the backbuffer */
+                  off_rt_transition(last_disp_slot, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                  rsx_dlss_capture_finished(s_d3d.cmd_list, s_d3d.off_rt[last_disp_slot].res);
+                  off_rt_transition(last_disp_slot, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                  cur_rt = 0x7FFF;   /* force the backbuffer rebind below */
+              } else
+#endif
+              {
                 off_rt_transition(last_disp_slot, D3D12_RESOURCE_STATE_COPY_SOURCE);
                 D3D12_RESOURCE_BARRIER bb = {0};
                 bb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -10606,6 +10805,7 @@ static void render_frame_exec(void)
                 { static int _n = 0; if ((_n < 3 && _n++ < 3))
                     fprintf(stderr, "[DISPRT] presented display buffer 0x%X (rt slot %d)%c",
                             s_d3d.off_rt[last_disp_slot].off, last_disp_slot, 10); }
+              }   /* DLSS upscaling: end of the copy branch */
             }
             /* Leave the backbuffer bound for the dump/present epilogue. */
             if (cur_rt >= 0) {
@@ -10821,11 +11021,18 @@ static void render_frame_exec(void)
 skip_dump_consider: ;
     guest_fb_present(fi);
     composite_present(fi);
+#ifdef PS3RECOMP_DLSS
+    if (s_rf_present && rsx_dlss_active()) {   /* DLAA over the finished game image, before the port's overlay */
+        const int dz = zs_find_off(rsx_dlss_exec_zeta(), s_d3d.width, s_d3d.height);
+        rsx_dlss_frame_end(s_d3d.cmd_list, s_d3d.render_targets[fi], BBW, BBH,
+                           dz >= 0 ? s_zs[dz].res : NULL, dz >= 0 ? (u32)s_zs[dz].st : 0u);
+    }
+#endif
     /* In-game system dialogs (cellMsgDialog) drawn over the finished frame -- rsx_ui_overlay.c. */
     { extern void uiov_render(ID3D12Device*, ID3D12GraphicsCommandList*, D3D12_CPU_DESCRIPTOR_HANDLE,
                               unsigned, unsigned, DXGI_FORMAT, HWND);
       D3D12_CPU_DESCRIPTOR_HANDLE uh;
-      s_d3d.rtv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.rtv_heap, &uh);
+      RSX_D3D12_CPU_HEAP_START(s_d3d.rtv_heap)(s_d3d.rtv_heap, &uh);
       uh.ptr += fi * s_d3d.rtv_descriptor_size;
       uiov_render(s_d3d.device, s_d3d.cmd_list, uh, BBW, BBH, DXGI_FORMAT_R8G8B8A8_UNORM, s_d3d.hwnd); }
     int dumping = (s_d3d.dump_frames_left > 0 && s_d3d.readback_buf
@@ -11362,6 +11569,9 @@ static void render_frame(void)
     s_rf_draws = s_d3d.draws; s_rf_count = s_d3d.draw_count;
     s_rf_parity = s_d3d.vp_parity; s_rf_frame_no = s_frame_no;
     s_rf_present = s_present_this_frame;
+#ifdef PS3RECOMP_DLSS
+    rsx_dlss_handoff(s_present_this_frame);   /* this batch's jitter/camera -> the render thread; next frame's jitter */
+#endif
     if (s_present_this_frame) { s_split_recs = 0; s_split_disp = 0; s_fs_pres_tick = GetTickCount64(); }   /* v103A */
     { extern volatile u32 g_gcm_last_flip_off; extern volatile u32 g_gcm_fifo_flip_off;
       /* v62: the flip the FIFO has executed up to (marker), not the PPU's latest request */
@@ -11402,7 +11612,9 @@ static void render_frame(void)
          * has seen the GPU finish it (usually already true). */
         const int telem = ps3_telem_enabled();
         double t0 = telem ? perf_now() : 0.0;
-        rf_wait_pumping(s_rf_gpuidle_ev);
+        { extern int v243c_rfbound_on(void); extern volatile int g_v243c_fifo_gpuwait;   /* v243C RFBOUND */
+          if (v243c_rfbound_on()) { g_v243c_fifo_gpuwait = 1; rf_wait_pumping(s_rf_gpuidle_ev); g_v243c_fifo_gpuwait = 0; }
+          else rf_wait_pumping(s_rf_gpuidle_ev); }
         if (telem) s_rf_gpuwait_ms += (perf_now() - t0) * 1000.0;
     }
     { static u32 n = 0; if (ps3_telem_enabled() && ++n % 600 == 0) {
@@ -12566,6 +12778,7 @@ static u32 vib_build(const rsx_state* st, const u32* L, u32 n, VPSlot* out, u32*
     s_perf_vconv += u;
     return u;
 }
+
 
 /* Same semantics as read_guest_index (base resolved from index_array_offset,
  * linear from there) with the resolve hoisted out of the per-index loop. */
@@ -13766,6 +13979,7 @@ static u64 s_ws_dirty, s_ws_spu_n, s_ws_other, s_ws_vpages;
  * ([VC_SWD] line, with the 1 MB chunks it happened in). */
 static u32* s_swd_gen = NULL;            /* per 4 KB page: FIFO frame number of the last SPU PUT into it (0 = never) */
 static int s_swd_init = 0, s_swd_ver = 8;
+static int s_swd_phase = -1;   /* v243C VC_SWD_PHASE=0|1: the map is kept always, the fast key is used only on that PS3_AB parity */
 static u64 s_swd_clean, s_swd_dirty, s_swd_verify, s_swd_missed;
 static u32 s_swd_missed_mb[4096];
 static void rsx_vc_note_spu_put(u32 ea, u32 size)
@@ -13789,6 +14003,7 @@ static inline int swd_on(void)
         s_swd_init = 1;
         const char* e = getenv("VC_SWD");
         { const char* v = getenv("VC_SWD_VERIFY"); if (v && atoi(v) >= 1) s_swd_ver = atoi(v); }
+        { const char* ph = getenv("VC_SWD_PHASE"); if (ph && *ph) s_swd_phase = atoi(ph) & 1; }   /* v243C */
         (void)vc_fk_active();   /* allocates the identity memo */
         if ((e && *e == '1') && s_vc_fk) {   /* v220c: opt-in (b026c / b027: neutral) */
             u32* g = (u32*)calloc(1u << 20, sizeof(u32));
@@ -13799,6 +14014,15 @@ static inline int swd_on(void)
                 s_swd_gen ? "ON" : "off", s_swd_ver, 10);
     }
     return s_swd_gen != NULL;   /* v221C: ABX 0x100000 now belongs to DCOAL (cellGcmSys.c); VC_SWD=1 alone switches this on */
+}
+/* v243C: swd_on() restricted to the VC_SWD_PHASE parity (unset: == swd_on()). Off phases run the plain hashing path;
+ * memo entries from an earlier on-phase are older than VC_SWD_VERIFY frames, so they are re-hashed before reuse. */
+static inline int swd_use(void)
+{
+    if (!swd_on()) return 0;
+    if (s_swd_phase < 0) return 1;
+    extern volatile int g_ab_phase;
+    return (g_ab_phase & 1) == s_swd_phase;
 }
 /* v220b: frame-order prefetch for the VC_SWD path (the VC_PF / VC_SEQ prefetches live in the non-FASTKEY branch).
  * b026c profile: hashing went 5.7 -> 3.7 % of the FIFO thread but vc_lookup itself 19.3 -> 21.0 % -- the memo line,
@@ -14084,8 +14308,8 @@ static int vc_lookup(const rsx_state* st, const u32* L, u32 n, u32* ib, u32* spa
     }
     vcw_drain();   /* sync path below owns the cache state now */
     int e = -1; u32 hit_data = 0;
-    if (keyed && (vc_fk_active() | swd_on())) {   /* v198 VC_FASTKEY: reuse the last full key when nothing visible changed */
-        const int sw = swd_on();      /* v220 VC_SWD: software page-dirty map (no poll, no sampling) */
+    if (keyed && (vc_fk_active() | swd_use())) {   /* v198 VC_FASTKEY: reuse the last full key when nothing visible changed */
+        const int sw = swd_use();     /* v220 VC_SWD: software page-dirty map (no poll, no sampling); v243C phase-gated */
         const int ww = sw ? 0 : ww_active();   /* v219: exact page write tracking instead of the 16-probe sample */
         SwdSeq* swq = NULL;
         if (sw) {   /* v220b frame-order prefetch */
@@ -14667,6 +14891,7 @@ typedef struct {
 typedef struct { u64 id, ih; u32 nch, cap; u32* ends; } DrwRun;
 static DrwEnt* s_drw = NULL; static DrwRun* s_drwr = NULL;
 static int s_drw_on = -1, s_drw_chk = 0, s_drw_bit = 0x800000;
+static int s_drw_phase = -1;   /* v243C DRW_PHASE=0|1: DRW only on that PS3_AB phase parity (unset = every phase) */
 static int s_drw_runact = 0; static u64 s_drw_runih = 0;
 static u64 s_drw_try, s_drw_hit, s_drw_new, s_drw_ihm, s_drw_stale, s_drw_ver, s_drw_gone, s_drw_psm, s_drw_store, s_drw_nostore,
            s_drw_chk_n, s_drw_chk_bad, s_drw_run, s_drw_runhit;
@@ -14677,6 +14902,7 @@ static int drw_active(void)
         const char* e = getenv("DRW");
         { const char* c = getenv("DRW_CHECK"); s_drw_chk = (c && *c == '1') ? 1 : 0; }
         { const char* b = getenv("DRW_BIT"); if (b && *b) s_drw_bit = (int)strtoul(b, NULL, 16); }
+        { const char* ph = getenv("DRW_PHASE"); if (ph && *ph) s_drw_phase = atoi(ph) & 1; }   /* v243C */
         const int sw = swd_on();
         if (e && *e == '1' && sw && !vcw_active()) {
             s_drw = (DrwEnt*)calloc(DRW_N, sizeof(DrwEnt));
@@ -14687,6 +14913,7 @@ static int drw_active(void)
                 s_drw_on ? "ON" : (e && *e == '1') ? (sw ? "OFF (VC_ASYNC is on / alloc failed)" : "OFF (needs VC_SWD=1)") : "off",
                 (unsigned)s_drw_bit, s_drw_chk ? " -- DRW_CHECK=1 verifies every replay (slow)" : "", 10);
     }
+    if (s_drw_phase >= 0) { extern volatile int g_ab_phase; if ((g_ab_phase & 1) != s_drw_phase) return 0; }   /* v243C */
     return s_drw_on > 0 && !(g_abx & s_drw_bit);
 }
 static inline const u8* drw_idx_ptr(const rsx_state* st, u32 first, u32* isz)
@@ -15581,6 +15808,21 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
         s_bbh = ((u32)((float)height * sc + 0.5f) + 1u) & ~1u;
         if (sc <= 1.0f) { s_bbw = width; s_bbh = height; }
         fprintf(stderr, "[RES] v154 internal resolution %ux%u (RES_SCALE %.2f, guest %ux%u)%c", s_bbw, s_bbh, sc, width, height, 10);
+#ifdef PS3RECOMP_DLSS
+        {   /* DLSS upscaling (DLSS_MODE quality / balanced / performance): the game renders at the mode's share of that
+             * size, never below the PS3's own 720p, and DLSS rebuilds the image at the full size */
+            float rs = sc * rsx_dlss_render_ratio();
+            if (rs < 1.0f) rs = 1.0f;
+            if (rs < sc - 0.001f) {
+                s_outw = s_bbw; s_outh = s_bbh; s_out_scale = sc;
+                s_res_scale = rs;
+                s_bbw = ((u32)((float)width * rs + 0.5f) + 1u) & ~1u;
+                s_bbh = ((u32)((float)height * rs + 0.5f) + 1u) & ~1u;
+                if (rs <= 1.0f) { s_bbw = width; s_bbh = height; }
+                fprintf(stderr, "[RES] DLSS upscaling: rendering %ux%u, output %ux%u%c", s_bbw, s_bbh, s_outw, s_outh, 10);
+            }
+        }
+#endif
     }
     s_d3d.clear_color[0] = 0.0f;
     s_d3d.clear_color[1] = 0.0f;

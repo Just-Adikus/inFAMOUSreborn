@@ -468,6 +468,20 @@ impl UpdateState {
     }
 }
 
+/// The setup program's record of the files it placed: merged into `update.state` so the next
+/// update removes those the repository no longer has (an update never deletes anything else).
+pub fn record_installed(root: &Path, files: &[String]) -> Result<()> {
+    let st = UpdateState::load(root);
+    let mut all = st.files;
+    for f in files {
+        if !all.contains(f) {
+            all.push(f.clone());
+        }
+    }
+    let commit = st.commit.unwrap_or_else(|| "setup".to_string());
+    save_state(root, &commit, &all)
+}
+
 fn save_state(root: &Path, commit: &str, files: &[String]) -> Result<()> {
     let mut s = format!("# Written by `infamous-installer update`.\ncommit {commit}\n");
     for f in files {
@@ -657,14 +671,19 @@ pub fn plan(root: &Path, m: &Manifest, r: &Remote) -> Result<Plan> {
         .cloned()
         .collect();
     let st = UpdateState::load(root);
-    let delete: Vec<String> = st
-        .files
-        .iter()
-        .filter(|f| {
-            !remote.contains_key(*f) && !protected(m, f) && util::join_slash(root, f).is_file()
-        })
-        .cloned()
-        .collect();
+    // Files an earlier update or the setup program placed that the repository no longer has,
+    // plus the manifest's [update] obsolete list (leftovers of older setups, e.g. the 1.0 setup's
+    // private mod files, which made the first update's build fail).
+    let mut delete: Vec<String> = Vec::new();
+    for f in st.files.iter().chain(m.update_obsolete.iter()) {
+        if !remote.contains_key(f)
+            && !protected(m, f)
+            && util::join_slash(root, f).is_file()
+            && !delete.contains(f)
+        {
+            delete.push(f.clone());
+        }
+    }
     Ok(Plan {
         commit,
         fetch,
@@ -929,5 +948,103 @@ mod manifest_tests {
         assert_eq!(m.update_repo.as_deref(), Some("whompay/inFAMOUSreborn"));
         assert_eq!(m.update_branch, "main");
         assert_eq!(m.update_path, "");
+    }
+}
+
+#[cfg(test)]
+mod v246_tests {
+    use super::*;
+
+    #[test]
+    fn setup_file_list_is_merged_into_the_update_state() {
+        let d = std::env::temp_dir().join(format!("upd-state-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        // fresh install: the setup's list becomes the baseline
+        record_installed(&d, &["a/x.c".to_string(), "b.txt".to_string()]).unwrap();
+        let st = UpdateState::load(&d);
+        assert_eq!(st.commit.as_deref(), Some("setup"));
+        assert_eq!(st.files, vec!["a/x.c", "b.txt"]);
+        // an update recorded its commit; re-running setup keeps it and adds new names once
+        save_state(
+            &d,
+            "0123456789abcdef0123456789abcdef01234567",
+            &["b.txt".to_string()],
+        )
+        .unwrap();
+        record_installed(&d, &["b.txt".to_string(), "c/skate.cpp".to_string()]).unwrap();
+        let st = UpdateState::load(&d);
+        assert_eq!(
+            st.commit.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        assert_eq!(st.files, vec!["b.txt", "c/skate.cpp"]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn shipped_manifest_forbids_the_private_mod_and_lists_its_leftovers() {
+        let m = crate::manifest::Manifest::load(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/infamous.toml"
+        )))
+        .unwrap();
+        for f in [
+            "infamous-recomp/skate_mod.cpp",
+            "infamous-recomp/skate_passthrough.h",
+            "infamous-recomp/mods/skate/README.md",
+            "ps3recomp/libs/video/rsx_skate_actor.c",
+            "ps3recomp/libs/video/rsx_skate_actor.h",
+            "infamous-recomp/tools/bench/skate_drive.ps1",
+            "infamous-recomp/HANDOFF_v246.md",
+            "INFAMOUS_CODE_PROVENANCE_AUDIT.md",
+            "infamous-recomp/gamedata-test/dev_hdd0/home/00000001/savedata/BLES00000_INFAMOUS_0/STATE",
+        ] {
+            assert_eq!(crate::pipeline::forbidden(&m, &[f.to_string()]).len(), 1, "{f} must be forbidden");
+            assert!(crate::util::any_match(&m.export_exclude, f), "{f} must be excluded");
+            assert!(!crate::util::any_match(&m.export_keep, f), "{f} must not be kept");
+        }
+        for f in [
+            "infamous-recomp/trainer.cpp",
+            "ps3recomp/libs/video/rsx_d3d12_abi.h",
+            "infamous-recomp/CMakeLists.txt",
+            "ps3recomp/CMakeLists.txt",
+            "infamous-recomp/stubs.cpp",
+        ] {
+            assert!(
+                crate::pipeline::forbidden(&m, &[f.to_string()]).is_empty(),
+                "{f} is needed"
+            );
+            assert!(
+                !crate::util::any_match(&m.export_exclude, f)
+                    || crate::util::any_match(&m.export_keep, f),
+                "{f} must be exported"
+            );
+        }
+        for f in [
+            "infamous-recomp/settings.ini",
+            "infamous-recomp/play_pgo.cmd",
+            "infamous-recomp/_bgtest/A_textures_off.cmd",
+            "infamous-recomp/memcmd.txt.out",
+            "infamous-recomp/tools/v246A_build.cmd",
+        ] {
+            assert!(
+                crate::util::any_match(&m.export_exclude, f)
+                    && !crate::util::any_match(&m.export_keep, f),
+                "{f} must be excluded"
+            );
+        }
+        assert!(
+            !crate::util::any_match(&m.export_exclude, "infamous-recomp/build.cmd")
+                || crate::util::any_match(&m.export_keep, "infamous-recomp/build.cmd")
+        );
+        assert!(m
+            .update_obsolete
+            .iter()
+            .any(|f| f == "ps3recomp/libs/video/rsx_skate_actor.c"));
+        assert!(m
+            .update_obsolete
+            .iter()
+            .all(|f| crate::pipeline::forbidden(&m, &[f.clone()]).len() == 1));
     }
 }

@@ -180,6 +180,17 @@ set(PORT_PPU_VR "OFF" CACHE STRING "Lifted PPU VMX register caching (v241B): OFF
 # for --vr alone (1041 fns x 20 seeds) but 1 unexplained diff with --nodrain (func_002B9E80 seed 16, budget-cut run).
 option(PORT_PPU_VR_NODRAIN "v241B --nodrain trampoline-drain elision (unverified)" OFF)
 set(PORT_PPU_VR_LIST "${CMAKE_CURRENT_SOURCE_DIR}/tools/v241B_vr_hot.txt" CACHE FILEPATH "Function list for PORT_PPU_VR=AB (v241B)")
+# v243A/v245 PORT_PPU_MEMLEAN (default OFF; only with PORT_PPU_REGCACHE): lean guest-memory accessors. AB = after the regcache
+# script, ps3recomp/tools/ppu_memacc_v243.py gives every function in PORT_PPU_MEMLEAN_LIST a twin whose loads/stores use
+# ps3recomp/runtime/ppu/ppu_memory_v243.h (no bounds compare on 8/16/64-bit loads, one byte-table test per store
+# instead of bounds + reservation-bitmap bit extraction) behind a dispatcher (g_v243a_sel, spu_coherency.c: lean only
+# once the runtime is verified to be in the standard fast mode; env V243A_MEM=0 old / V243A_MEM_PHASE=0|1 lean only in
+# that PS3_AB parity / default lean). ALL = v245 production form: rewrite each listed function in place, retaining its
+# original symbol/PGO profile and removing the old twin plus per-call dispatcher. ALL requires the standard fast memory
+# model and fails closed before guest execution if diagnostics or incompatible limits disable it. OFF = no TU changes.
+set(PORT_PPU_MEMLEAN "OFF" CACHE STRING "Lifted PPU lean guest accessors (v243A/v245): OFF, AB or ALL")
+set_property(CACHE PORT_PPU_MEMLEAN PROPERTY STRINGS OFF AB ALL)
+set(PORT_PPU_MEMLEAN_LIST "${CMAKE_CURRENT_SOURCE_DIR}/tools/v243A_mem_hot.txt" CACHE FILEPATH "Function list for PORT_PPU_MEMLEAN=AB/ALL (v243A/v245)")
 if(PORT_PPU_REGCACHE)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     set(_rc_flags --stats)
@@ -221,10 +232,19 @@ if(PORT_PPU_REGCACHE)
         get_filename_component(_name "${_src}" NAME)
         if(_name MATCHES "^ppu_recomp_[0-9]+\\.(c|cpp)$")
             set(_out "${_rc_dir}/${_name}")
+            set(_ma_cmd "")   # v243A PORT_PPU_MEMLEAN: empty when OFF -> identical command
+            set(_ma_deps "")
+            if(PORT_PPU_MEMLEAN STREQUAL "AB" OR PORT_PPU_MEMLEAN STREQUAL "ALL")
+                string(TOLOWER "${PORT_PPU_MEMLEAN}" _ma_mode)
+                set(_ma_cmd COMMAND "${Python3_EXECUTABLE}" "${PS3RECOMP_DIR}/tools/ppu_memacc_v243.py" "${_out}" "${_out}"
+                    "--list=${PORT_PPU_MEMLEAN_LIST}" "--hdr=${PS3RECOMP_DIR}/runtime/ppu/ppu_memory_v243.h" "--mode=${_ma_mode}" --stats)
+                set(_ma_deps "${PS3RECOMP_DIR}/tools/ppu_memacc_v243.py" "${PS3RECOMP_DIR}/runtime/ppu/ppu_memory_v243.h" "${PORT_PPU_MEMLEAN_LIST}")
+            endif()
             add_custom_command(
                 OUTPUT "${_out}"
                 COMMAND "${Python3_EXECUTABLE}" "${_rc_script}" "${_src}" "${_out}" ${_rc_flags}
-                DEPENDS "${_src}" "${_rc_script}" ${_rc_deps}
+                ${_ma_cmd}
+                DEPENDS "${_src}" "${_rc_script}" ${_rc_deps} ${_ma_deps}
                 COMMENT "PPU register caching (v103): ${_name}")
             list(APPEND _rc_sources "${_out}")
         else()
@@ -233,6 +253,15 @@ if(PORT_PPU_REGCACHE)
     endforeach()
     set(RECOMP_SOURCES ${_rc_sources})
     message(STATUS "Lifted PPU:      register-cached copies in ${_rc_dir} (PORT_PPU_REGCACHE=ON, v103)")
+    if(PORT_PPU_MEMLEAN STREQUAL "AB")
+        message(STATUS "Lifted PPU:      lean guest-accessor A/B twins for ${PORT_PPU_MEMLEAN_LIST} (PORT_PPU_MEMLEAN=AB, v243A)")
+    elseif(PORT_PPU_MEMLEAN STREQUAL "ALL")
+        # Only the startup scaffold needs the gate. A directory-wide definition
+        # would needlessly rebuild every SPU image and runtime source.
+        set_property(SOURCE "${PS3RECOMP_DIR}/runtime/ppu/ppu_loader.cpp" APPEND
+                     PROPERTY COMPILE_DEFINITIONS PORT_PPU_MEMLEAN_ALL=1)
+        message(STATUS "Lifted PPU:      direct lean guest accessors for ${PORT_PPU_MEMLEAN_LIST} (PORT_PPU_MEMLEAN=ALL, v245; no twins/dispatch)")
+    endif()
 else()
     message(STATUS "Lifted PPU:      original TUs (PORT_PPU_REGCACHE=OFF)")
 endif()
@@ -386,6 +415,7 @@ endif()
 set(PORT_GAME_SOURCES
     main.cpp
     stubs.cpp
+    trainer.cpp      # F10 in-game trainer (trainer.h)
 )
 
 add_executable(${PROJECT_NAME}
@@ -395,6 +425,24 @@ add_executable(${PROJECT_NAME}
     ${RECOMP_SOURCES}
     ${SPU_SOURCES}
 )
+
+# The title-specific host glue used to be the last sizeable body of hot code
+# left at clang-cl's baseline x86-64 target.  In particular stubs.cpp contains
+# frequently-called HLE shims, while main.cpp owns the FIFO/vblank pump.  The
+# lifted PPU/SPU and ps3recomp runtime already use this exact feature set.
+# Keep it coupled to PORT_SPU_AVX2 so the v242 compatibility build remains
+# SSE4.1-only, and disable implicit FP contraction so enabling host SIMD cannot
+# change an existing a*b+c into a fused operation.  Explicit fma() calls retain
+# their defined single-rounding behaviour.
+if(PORT_SPU_AVX2 AND (NOT MSVC OR CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
+    set(_host_glue_fp "-ffp-contract=off")
+    if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        set(_host_glue_fp "/clang:-ffp-contract=off")
+    endif()
+    set_property(SOURCE ${PORT_GAME_SOURCES} APPEND PROPERTY COMPILE_OPTIONS
+        -mavx2 -mfma -mbmi2 "${_host_glue_fp}")
+    message(STATUS "Host game glue:   AVX2/FMA/BMI2 codegen (FP contraction off)")
+endif()
 
 # The lifted SPU sources use bare #include "spu_context.h". Scope that include
 # directory (and their flags) to those TUs alone: adding it to the whole target

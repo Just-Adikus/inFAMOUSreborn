@@ -19,6 +19,9 @@
 #include <math.h>
 #include "../../runtime/platform/win32_compat.h"   /* GetTickCount64 on POSIX */
 #include "../../runtime/ppu/ppu_memory.h"   /* GUEST_PTR, vm_write*: guest EA -> host */
+#ifdef PS3RECOMP_SDL3
+#include "pad_sdl3.h"           /* PlayStation / Steam controllers through SDL3 (pad_sdl3.c) */
+#endif
 
 /* ---------------------------------------------------------------------------
  * Backend selection
@@ -760,6 +763,38 @@ static void pad_shutdown_backend(void)
 
 #endif /* PAD_BACKEND_XINPUT */
 
+#if defined(PS3RECOMP_SDL3) && PAD_BACKEND_XINPUT
+/* PlayStation / Steam controllers (pad_sdl3.c) take the host ports XInput left empty, in connection order.
+ * s_sdl_slot[port] = their pad_sdl3 index, for rumble (-1 = not an SDL pad). */
+static int s_sdl_slot[PAD_MAX_HOST_PORTS] = { -1, -1, -1, -1 };
+static void pad_merge_sdl3(void)
+{
+    PadSdlPad sp[PAD_MAX_HOST_PORTS];
+    const int ns = pad_sdl3_get(sp, PAD_MAX_HOST_PORTS);
+    int k = 0;
+    for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
+        s_sdl_slot[i] = -1;
+        if (s_host_state[i].connected || k >= ns) continue;
+        const PadSdlPad* p = &sp[k];
+        PadHostState* h = &s_host_state[i];
+        const u16 b = p->buttons;
+        h->connected = 1; h->buttons = b;
+        h->analog_lx = p->lx; h->analog_ly = p->ly; h->analog_rx = p->rx; h->analog_ry = p->ry;
+        h->trigger_l2 = p->l2; h->trigger_r2 = p->r2;
+        h->press_up = (b & CELL_PAD_CTRL_UP) ? 255 : 0;             h->press_down = (b & CELL_PAD_CTRL_DOWN) ? 255 : 0;
+        h->press_left = (b & CELL_PAD_CTRL_LEFT) ? 255 : 0;         h->press_right = (b & CELL_PAD_CTRL_RIGHT) ? 255 : 0;
+        h->press_triangle = (b & CELL_PAD_CTRL_TRIANGLE) ? 255 : 0; h->press_circle = (b & CELL_PAD_CTRL_CIRCLE) ? 255 : 0;
+        h->press_cross = (b & CELL_PAD_CTRL_CROSS) ? 255 : 0;       h->press_square = (b & CELL_PAD_CTRL_SQUARE) ? 255 : 0;
+        h->press_l1 = (b & CELL_PAD_CTRL_L1) ? 255 : 0;             h->press_r1 = (b & CELL_PAD_CTRL_R1) ? 255 : 0;
+        /* controller activity -> controller prompts (sticks past ~37 %, like the XInput path) */
+        const int moved = p->lx < 80 || p->lx > 176 || p->ly < 80 || p->ly > 176 || p->rx < 80 || p->rx > 176 || p->ry < 80 || p->ry > 176;
+        if (b || moved) pad_note_device(0);
+        else if (g_input_kbm < 0) pad_note_device(0);
+        s_sdl_slot[i] = k++;
+    }
+}
+#endif
+
 /* ---------------------------------------------------------------------------
  * SDL2 backend
  * -----------------------------------------------------------------------*/
@@ -952,6 +987,9 @@ static void pad_poll_backend_do(void)
 #endif
 #if PAD_BACKEND_XINPUT
     pad_poll_xinput();
+#ifdef PS3RECOMP_SDL3
+    pad_merge_sdl3();   /* PlayStation / Steam controllers into the ports XInput left empty */
+#endif
 #elif PAD_BACKEND_SDL2
     pad_poll_sdl2();
 #endif
@@ -986,6 +1024,9 @@ static DWORD WINAPI pad_thread_main(LPVOID arg)
     (void)arg;
     InterlockedExchange(&s_pad_thread_live, 1);   /* v179 */
     while (s_pad_thread_run) {
+#ifdef PS3RECOMP_SDL3
+        pad_sdl3_update();   /* SDL3 gamepads: every SDL call happens on this thread */
+#endif
         pad_poll_backend_do();
         Sleep(PAD_POLL_INTERVAL_MS);
     }
@@ -1088,6 +1129,7 @@ void cellPad_poll(void)
  *   tpd <x> <y> <z> <eps> <dx> <dy> <dz> [frames]  same, target = found position + d (keeps the other copies consistent) */
 static u32*  s_mc_addr = NULL; static float* s_mc_val = NULL; static size_t s_mc_n = 0, s_mc_cap = 0;
 static u32   s_mc_hold_addr[256]; static float s_mc_hold_v[256][3]; static int s_mc_hold_n = 0, s_mc_hold_frames = 0;
+static u32   s_mc_hf_addr = 0; static float s_mc_hf_v = 0; static int s_mc_hf_polls = 0;   /* trainer hunt: holdf */
 static FILE* s_mc_out = NULL;
 static void mc_log(const char* fmt, ...)
 {
@@ -1210,7 +1252,7 @@ static void mc_goto_tick(void)
     }
     if (dist <= s_gt_tol || now >= s_gt_end || !(x == x)) {
         s_gt_on = 0; s_mc_btn = 0;
-        g_pf_stick[0] = g_pf_stick[1] = 128; g_pf_stick_on = 1;
+        g_pf_stick[0] = g_pf_stick[1] = 128; g_pf_stick_on = 0;   /* release to the real pad (was stuck at centre) */
         mc_log("[goto] %s at %.0f %.0f %.0f (dist %.0f, theta %.0f deg)\n", dist <= s_gt_tol ? "ARRIVED" : "TIMEOUT", x, y, z, dist, s_gt_theta * 57.2958f);
         return;
     }
@@ -1273,6 +1315,12 @@ static void mc_exec(char* line)
     } else if (!strcmp(cmd, "poke")) {
         sscanf(line, "%*s %x %lf", (int*)&addr, &p[0]); mc_wr(addr, (float)p[0]);
         mc_log("[memcmd] poke 0x%08X = %.4f\n", addr, mc_rd(addr));
+    } else if (!strcmp(cmd, "holdf")) {   /* holdf <hexEA> <f32> <polls>: write one float now and on every pad poll (= every game frame)
+                                            * for <polls> more frames; "holdf 0 0 0" stops. Trainer velocity test (+0xE20..) */
+        int n = 0; sscanf(line, "%*s %x %lf %d", (int*)&addr, &p[0], &n);
+        s_mc_hf_addr = addr; s_mc_hf_v = (float)p[0]; s_mc_hf_polls = addr ? n : 0;
+        if (addr) mc_wr(addr, s_mc_hf_v);
+        mc_log("[memcmd] holdf 0x%08X = %.4f for %d frames\n", addr, addr ? mc_rd(addr) : 0.0f, s_mc_hf_polls);
     } else if (!strcmp(cmd, "poke3")) {
         sscanf(line, "%*s %x %lf %lf %lf", (int*)&addr, &p[0], &p[1], &p[2]);
         for (int k = 0; k < 3; k++) mc_wr(addr + 4 * k, (float)p[k]);
@@ -1321,6 +1369,44 @@ static void mc_exec(char* line)
         FILE* f = fn[0] ? fopen(fn, "wb") : NULL;
         if (f && n && n <= (64u << 20)) { fwrite(vm_base + addr, 1, n, f); fclose(f); mc_log("[memcmd] dump 0x%08X +0x%X -> %s\n", addr, n, fn); }
         else { if (f) fclose(f); mc_log("[memcmd] dump failed\n"); }
+    } else if (!strcmp(cmd, "dumpall")) {   /* dumpall <prefix>: every committed guest range except RSX VRAM ->
+                                              * <prefix>.idx (start size per line) + <prefix>.bin (concatenated) */
+        char pre[400] = {0};
+        sscanf(line, "%*s %399s", pre);
+        if (!pre[0]) { mc_log("[memcmd] dumpall needs a prefix\n"); return; }
+        char fn[420]; snprintf(fn, sizeof fn, "%s.bin", pre);
+        FILE* bin = fopen(fn, "wb");
+        snprintf(fn, sizeof fn, "%s.idx", pre);
+        FILE* idx = fopen(fn, "w");
+        unsigned long long total = 0; int nr = 0;
+        if (bin && idx) {
+            unsigned long long a = 0x00010000ull;
+            while (a < 0xF0000000ull) {
+                MEMORY_BASIC_INFORMATION mi;
+                if (!VirtualQuery(vm_base + a, &mi, sizeof mi)) break;
+                unsigned long long end = (unsigned long long)((uint8_t*)mi.BaseAddress - vm_base) + mi.RegionSize;
+                if (end > 0xF0000000ull) end = 0xF0000000ull;
+                const DWORD ok = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE;
+                const int vram = a >= 0x10000000ull && a < 0x20000000ull;
+                if (mi.State == MEM_COMMIT && (mi.Protect & ok) && !(mi.Protect & PAGE_GUARD) && !vram) {
+                    fwrite(vm_base + a, 1, (size_t)(end - a), bin);
+                    fprintf(idx, "%08llX %llX\n", a, end - a);
+                    total += end - a; nr++;
+                }
+                if (end <= a) break;
+                a = end;
+            }
+        }
+        if (bin) fclose(bin);
+        if (idx) fclose(idx);
+        mc_log("[memcmd] dumpall %s: %d ranges, %llu MB\n", pre, nr, total >> 20);
+    } else if (!strcmp(cmd, "wwatch")) {   /* wwatch <hexEA> [hexlen]: aim the PPU_WWATCH store watch live (needs PPU_WWATCH
+                                             * set at launch); hits go to stderr as [ww] with the writing guest function */
+        extern volatile uint32_t g_ww_live, g_ww_live_len; extern volatile long g_ww_live_gen; extern uint32_t g_ww_lo, g_ww_hi;
+        unsigned len = 0x20; sscanf(line, "%*s %x %x", (int*)&addr, &len);
+        if (len < 0x20) len = 0x20;
+        g_ww_live_len = len; g_ww_live = addr; g_ww_lo = addr & ~15u; g_ww_hi = (addr & ~15u) + len; g_ww_live_gen++;
+        mc_log("[memcmd] wwatch 0x%08X +0x%X%s\n", addr, len, getenv("PPU_WWATCH") ? "" : "  (PPU_WWATCH was not set at launch: lifted stores bypass the watch!)");
     } else if (!strcmp(cmd, "goto")) {
         double t[5] = {0, 0, 150, 60, 1e9};
         sscanf(line, "%*s %lf %lf %lf %lf %lf", &t[0], &t[1], &t[2], &t[3], &t[4]);
@@ -1331,7 +1417,7 @@ static void mc_exec(char* line)
     } else if (!strcmp(cmd, "theta")) {
         double t = 0; sscanf(line, "%*s %lf", &t); s_gt_theta = (float)(t / 57.2958); mc_log("[goto] theta = %.0f deg\n", t);
     } else if (!strcmp(cmd, "stop")) {
-        s_gt_on = 0; s_mc_btn = 0; g_pf_stick[0] = g_pf_stick[1] = 128; mc_log("[goto] stopped\n");
+        s_gt_on = 0; s_mc_btn = 0; g_pf_stick[0] = g_pf_stick[1] = 128; g_pf_stick_on = 0; mc_log("[goto] stopped, sticks released\n");
     } else if (!strcmp(cmd, "posaddr")) {
         sscanf(line, "%*s %x", &s_gt_pos); mc_log("[goto] position at 0x%08X\n", s_gt_pos);
     } else if (!strcmp(cmd, "pos")) {
@@ -1345,6 +1431,7 @@ static void pad_memcmd_poll(void)
                   if (on) { snprintf(path, sizeof path, "%s", e); char op[520]; snprintf(op, sizeof op, "%s.out", e); s_mc_out = fopen(op, "ab");
                             printf("[memcmd] v219 memory tool on (%s)\n", path); fflush(stdout); } }
     if (!on) return;
+    if (s_mc_hf_polls > 0) { s_mc_hf_polls--; mc_wr(s_mc_hf_addr, s_mc_hf_v); }
     if (s_mc_hold_frames > 0) { s_mc_hold_frames--;
         for (int i = 0; i < s_mc_hold_n; i++) for (int k = 0; k < 3; k++) mc_wr(s_mc_hold_addr[i] + 4 * k, s_mc_hold_v[i][k]); }
     mc_goto_tick();
@@ -1365,6 +1452,12 @@ static void pad_memcmd_poll(void)
 static void pad_memcmd_poll(void) {}
 static unsigned s_mc_btn = 0;
 #endif
+
+/* rsx_ui_trainer.h: set by the title (e.g. the inFamous trainer), NULL = nothing. */
+void (*volatile g_pad_title_tick_fn)(void) = 0;
+/* rsx_ui_trainer.h: port 0 as the game last received it (left stick x,y 0..255; digital DIGITAL2<<8 | DIGITAL1). */
+volatile unsigned char g_pad_title_lstick[2] = {128, 128};
+volatile unsigned g_pad_title_digital = 0;
 
 s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
 {
@@ -1558,6 +1651,8 @@ skip_inject: ;
      *                            # long hold; the default is 40)
      */
     if (port_no == 0) pad_memcmd_poll();   /* v219 MEMCMD bench memory tool */
+    /* Title per-frame hook (rsx_ui_trainer.h): the game's main PPU thread inside an HLE call, between frames. */
+    if (port_no == 0 && g_pad_title_tick_fn) g_pad_title_tick_fn();
     { static int s_pf = -1; static char pf_path[512];
       static unsigned held_mask = 0; static int held_n = 0;
       if (s_pf < 0) { const char* e = getenv("PAD_FILE");
@@ -1658,6 +1753,12 @@ skip_inject: ;
 
     if (g_pad_filter)
         g_pad_filter(port_no, data->button, data->len);
+    if (port_no == 0) {
+        g_pad_title_lstick[0] = (unsigned char)data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X];
+        g_pad_title_lstick[1] = (unsigned char)data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_Y];
+        g_pad_title_digital = (((unsigned)data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] & 0xFFu) << 8) |
+                              ((unsigned)data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] & 0xFFu);
+    }
 
     /* Pressure-sensitive buttons (only meaningful if PRESS_ON) */
     if (setting & CELL_PAD_SETTING_PRESS_ON) {
@@ -1981,6 +2082,13 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
         return CELL_PAD_ERROR_INVALID_PARAMETER;
 
     param = GUEST_PTR(param, CellPadActParam*);
+#if defined(PS3RECOMP_SDL3) && PAD_BACKEND_XINPUT
+    if (!pad_rumble_enabled()) return CELL_OK;   /* PAD_RUMBLE=0 */
+    if (port_no < PAD_MAX_HOST_PORTS && s_sdl_slot[port_no] >= 0) {   /* a PlayStation / Steam controller */
+        pad_sdl3_rumble(s_sdl_slot[port_no], param->motor[CELL_PAD_ACTUATOR_PARAM_SMALL], param->motor[CELL_PAD_ACTUATOR_PARAM_LARGE]);
+        return CELL_OK;
+    }
+#endif
 
 #if PAD_BACKEND_XINPUT
     /* Map to XInput vibration */

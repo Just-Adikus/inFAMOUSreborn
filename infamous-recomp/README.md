@@ -6,6 +6,7 @@ The inFamous-specific half of the port, built on top of `../ps3recomp`.
 |---|---|
 | `main.cpp` | Program entry: memory setup, window, runtime start |
 | `stubs.cpp` | Game-specific replacements for recompiled functions and system calls |
+| `trainer.cpp`, `trainer.h` | The in-game trainer (F10): god mode, energy, health, XP, karma, Super Speed, Player Model |
 | `infamous_clock_probe.h`, `car_v233.h` | Frame pacing and streaming / pop-in options |
 | `spu/jobmods_extra_map.json`, `spu/jobmod_*/lodx_*.h` | Hand-written additions to the lifted SPU job modules |
 | `tools` | Asset tools run by the installer: dialog font, keyboard/mouse prompt glyphs |

@@ -553,7 +553,7 @@ pub fn export_files(m: &Manifest, root: &Path, skip_extra: &[String]) -> Result<
         skip || (excl && !kept)
     };
     let files = util::walk_files(root, SKIP_DIRS, &|d| !dir_pruned(d))?;
-    Ok(files
+    let files: Vec<String> = files
         .into_iter()
         .filter(|f| {
             if m.is_generated(f) {
@@ -561,7 +561,25 @@ pub fn export_files(m: &Manifest, root: &Path, skip_extra: &[String]) -> Result<
             }
             util::any_match(&m.export_keep, f) || !util::any_match(&m.export_exclude, f)
         })
-        .collect())
+        .collect();
+    let bad = forbidden(m, &files);
+    if !bad.is_empty() {
+        crate::bail!(
+            "the export would include {} file(s) listed in [export] forbid (private, never published):\n  {}\nAdd them to [export] exclude.",
+            bad.len(),
+            bad.join("\n  ")
+        );
+    }
+    Ok(files)
+}
+
+/// The files of `files` that `[export] forbid` names.
+pub fn forbidden(m: &Manifest, files: &[String]) -> Vec<String> {
+    files
+        .iter()
+        .filter(|f| util::any_match(&m.export_forbid, f))
+        .cloned()
+        .collect()
 }
 
 pub fn export_tree(m: &Manifest, root: &Path, out: &Path) -> Result<(usize, u64)> {

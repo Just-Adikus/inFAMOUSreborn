@@ -2989,9 +2989,9 @@ static DWORD WINAPI spurs_lane_worker(LPVOID p)
             if (g_spurs_pm_polls) lp->st_busy[lane]++;
         }
         lp->done++;
-        /* One kernel waits for the whole lane batch. Intermediate completions
-         * cannot satisfy it and used to cause three needless wake/park cycles. */
-        if ((u32)lp->done == (w242 ? (u32)w242 : lp->nworkers)) WakeAllConditionVariable(&lp->cv_done);   /* v242A: join target = width */
+        /* There is exactly one kernel joiner per pool/pass.  Waking one avoids
+         * a pointless wake-all scan while preserving the same predicate. */
+        if ((u32)lp->done == (w242 ? (u32)w242 : lp->nworkers)) WakeConditionVariable(&lp->cv_done);   /* v245 */
         ReleaseSRWLockExclusive(&lp->lk);
     }
     return 0;
@@ -3883,6 +3883,7 @@ void ps3_taskwait_end(void)
     if (t_tw_wid >= 0 && t_tw_wid <= 16) { g_fr_tw_us[t_tw_wid] += d; g_fr_tw_n[t_tw_wid]++; }   /* v113 */
     else { g_fr_tw_us[16] += d; g_fr_tw_n[16]++; }
     bj_end(d);   /* v202 */
+    { extern void w6tl_wait(int wid, long long dur_us); w6tl_wait(t_tw_wid, d); }   /* v246 W6TL diagnostic (default off) */
     s_tw_n++; s_tw_us += d; if (d > s_tw_max) s_tw_max = d; if (d < 5) s_tw_fast++;
     if (t_tws_t0 && t_tw_wid >= 0 && t_tw_wid <= 16) {   /* v241A [TWSPLIT]: the tail rescan before the end counts too */
         const unsigned long long n = __rdtsc();

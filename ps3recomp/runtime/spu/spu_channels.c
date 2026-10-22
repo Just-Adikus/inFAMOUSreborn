@@ -4347,6 +4347,25 @@ int spu_dma_fast_init(void)
     g_spu_dma_fast = on;
     return on;
 }
+/* v246C V246C_DMAPF (spu_dma.h): GET prefetch; 0/unset = old path. */
+int g_v246c_dmapf = -1;
+int g_v246c_dmapf_phase = -1;
+int g_v246c_dmapf_d = 4;
+SPU_THREAD_LOCAL v246c_pf_tls g_v246c_pf;
+int v246c_dmapf_init(void)
+{
+    int f = 0, ph = -1, d = 4;
+    { const char* e = getenv("V246C_DMAPF"); if (e && *e) f = atoi(e) & 3; }
+    { const char* e = getenv("V246C_DMAPF_PHASE"); if (e && *e) ph = atoi(e) & 1; }
+    { const char* e = getenv("V246C_DMAPF_D"); if (e && *e) { d = atoi(e); if (d < 1) d = 1; if (d > 16) d = 16; } }
+    g_v246c_dmapf_phase = ph; g_v246c_dmapf_d = d;
+    static volatile long s_logged = 0;
+    if (__sync_bool_compare_and_swap(&s_logged, 0, 1))
+        fprintf(stderr, "[v246C] DMA GET prefetch V246C_DMAPF=%d (1 list lookahead D=%d, 2 single-GET stride), A/B parity %d\n",
+                f, d, ph);
+    g_v246c_dmapf = f;
+    return f;
+}
 /* [DMASTAT]: per-thread counters (spu_dma.h) folded into globals every 16k transfers; the thread
  * whose fold crosses a 10 s boundary prints. Fast path only. */
 SPU_THREAD_LOCAL spu_dmastat_tls g_spu_dmastat;

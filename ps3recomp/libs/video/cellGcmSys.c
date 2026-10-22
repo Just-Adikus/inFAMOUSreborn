@@ -798,7 +798,7 @@ unsigned long long ps3_ms_now(void)
 /* v103A [VRAM-DMA]: SPU DMA that touches RSX local memory (EA 0xC0000000-0xCFFFFFFF), bucketed per 1 MB of
  * local offset, reported every 10 s (first 60 reports, then one per minute). The D3D12 renderer keeps render
  * targets GPU-only: an SPU GET from a render target's offset reads stale guest bytes, an SPU PUT into a texture
- * the renderer cached is only seen if its checksum changes. Called from the SPU DMA path
+ * the renderer cached is only seen if its checksum changes (playbook fact 63). Called from the SPU DMA path
  * (proposal _xfer/proposals/v103_A_spu_dma.diff); VRAM_DMA_LOG=0 turns the report off. inFamous' surfaces:
  * 0x1010000 zeta, 0x13B0000/0x1734000 display, 0x1AB8000/0x1E3C000/0x1F22000/0x2008000/0x2080000/0x21C0000
  * colour targets, 0xF340000 shadow depth. */
@@ -1502,8 +1502,13 @@ void* cellGcm_fifo_kick_event(void)
 /* v28: guest store to the FIFO put register while the present thread idles
  * in cellGcm_fifo_kick_wait -> wake it now (called from ppu_loader vm_write32). */
 volatile long g_rsx_idle_wait = 0;
+int v243c_rfbound_on(void);                    /* v243C RFBOUND (defined below) */
+extern volatile long long g_v243c_st[16];
+static volatile long long g_v243c_last_put_qpc;
 void cellGcm_put_kick(void)
 {
+    if (__builtin_expect(v243c_rfbound_on(), 0)) {   /* v243C RFBOUND: guest put stores */
+        LARGE_INTEGER q; QueryPerformanceCounter(&q); g_v243c_last_put_qpc = q.QuadPart; g_v243c_st[0]++; }
     /* Keep kicks made BETWEEN the last drain and entering the wait. Testing
      * idle alone lost that notification and added a full 4ms timeout. Coalesce
      * active-period stores so we do not issue a kernel call for every PUT. */
@@ -1536,8 +1541,49 @@ static SRWLOCK s_ref_pub_lock = SRWLOCK_INIT;
 volatile int g_fifo_where = 0;
 static unsigned long long s_dry_where[8];
 
+/* v243C RFBOUND=1 (default off: nothing below runs): wall time the MAIN guest thread spends in its fence poll loops
+ * (func_001167C4 usleep(5) on ctrl->ref), split by what the FIFO thread was doing at each poll (g_fifo_where; 6 = the
+ * FIFO thread waits for the GPU of frame N-1, set by the backend while RFBOUND is on). Consecutive main-thread polls
+ * less than 200 us apart count as waiting. Read per frame by the backend's [RFBOUND] report. */
+volatile long long g_v243c_fence_qpc[8];
+volatile int g_v243c_fifo_gpuwait = 0;
+/* [0] guest put stores, [1] main fence waits begun, [2] FIFO backlog bytes (put - get) at wait start, [3] QPC since the
+ * last put store at wait start, [4] QPC the FIFO walker spun in NV406E ACQUIRE (SPU label waits), [5] the part of [4]
+ * while the main thread was in a fence wait, [6] ACQUIRE spins, [7] QPC of the main thread's last fence poll,
+ * [8] QPC from a put store until the walker drained it (get == put), [9] the walker's time inside the FIFO walk in
+ * that window, [10] such windows */
+volatile long long g_v243c_st[16];
+int v243c_rfbound_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("RFBOUND"); on = (e && *e == '1') ? 1 : 0; }
+    return on;
+}
+static volatile long long g_v243c_last_put_qpc = 0;
+static void v243c_fence_note(void)
+{
+    extern int ps3_hz_is_main(void);
+    if (!ps3_hz_is_main()) return;
+    static LARGE_INTEGER f; static LONGLONG last = 0, thr = 0;
+    if (!f.QuadPart) { QueryPerformanceFrequency(&f); thr = f.QuadPart / 5000; }   /* 200 us */
+    LARGE_INTEGER now; QueryPerformanceCounter(&now);
+    if (last && now.QuadPart - last < thr) {
+        int w = g_fifo_where & 7;
+        if (w == 5 && g_v243c_fifo_gpuwait) w = 6;
+        g_v243c_fence_qpc[w] += now.QuadPart - last;
+    } else {   /* a new wait begins: how far behind is the walker, how long since the guest published commands? */
+        const u32 put = vm_read32(GCM_CONTROL_GUEST_ADDR + 0);
+        const u32 back = put - s_fifo_getoff;
+        g_v243c_st[1]++;
+        if (back < 0x01000000u) g_v243c_st[2] += back;
+        if (g_v243c_last_put_qpc) g_v243c_st[3] += now.QuadPart - g_v243c_last_put_qpc;
+    }
+    last = now.QuadPart;
+    g_v243c_st[7] = now.QuadPart;
+}
 void cellGcm_ref_on_poll(void)
 {
+    if (__builtin_expect(v243c_rfbound_on(), 0)) v243c_fence_note();   /* v243C RFBOUND */
     /* Pace: leave each published value observable for >= ~200us of spins
      * (equality-waiters at any poll rate see every value; still ~5000/s so
      * loading's fence storms clear in seconds, not minutes). */
@@ -1672,6 +1718,17 @@ static void gcm_rsx_process_fifo_unlocked(void)
     }
 
     u32 start_off = s_fifo_getoff;
+    /* v243C RFBOUND: walker latency per guest put (the guest publishes a whole frame with one put) */
+    static u32 s_v243c_put = 0xFFFFFFFFu; static int s_v243c_open = 0; static long long s_v243c_t0q = 0, s_v243c_busy = 0;
+    LARGE_INTEGER v243c_q0 = {0};
+    const int v243c_rb = v243c_rfbound_on();
+    if (__builtin_expect(v243c_rb, 0)) {
+        QueryPerformanceCounter(&v243c_q0);
+        if (put != s_v243c_put && put != s_fifo_getoff) {
+            if (!s_v243c_open) { s_v243c_open = 1; s_v243c_t0q = g_v243c_last_put_qpc ? g_v243c_last_put_qpc : v243c_q0.QuadPart; s_v243c_busy = 0; }
+            s_v243c_put = put;
+        }
+    }
     static int s_draindbg = -1; if (s_draindbg < 0) s_draindbg = getenv("GCM_DRAINDBG") ? 1 : 0;   /* v180: cached */
     if (s_draindbg) {
         static int n = 0;
@@ -2012,7 +2069,11 @@ static void gcm_rsx_process_fifo_unlocked(void)
                  * whole present-thread idle tick */
                 { LARGE_INTEGER f, a, b; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&a);
                   do { if (vm_read32(la) == v) break; SwitchToThread(); QueryPerformanceCounter(&b); }
-                  while ((b.QuadPart - a.QuadPart) * 1000000LL / f.QuadPart < 1500); }
+                  while ((b.QuadPart - a.QuadPart) * 1000000LL / f.QuadPart < 1500);
+                  if (__builtin_expect(v243c_rfbound_on(), 0)) {   /* v243C RFBOUND: walker time spent on SPU labels */
+                      QueryPerformanceCounter(&b); const long long d = b.QuadPart - a.QuadPart;
+                      g_v243c_st[4] += d; g_v243c_st[6]++;
+                      if (a.QuadPart - g_v243c_st[7] < f.QuadPart / 5000) g_v243c_st[5] += d; } }
                 if (vm_read32(la) == v) { w_get = 0xFFFFFFFFu; continue; }
                 if ((long)(now - w_t0) * 1000L / (long)CLOCKS_PER_SEC < tmo) { sem_blocked = 1; break; }
                 n_tmo++;
@@ -2100,6 +2161,141 @@ static void gcm_rsx_process_fifo_unlocked(void)
                             s_state.index_array_dma = GCM_FIFO_ARG(1);
                             s_fifo_getoff += 12u;
                             continue;
+                        }
+                      }
+                      /* v245E GCM_STATE_PACKET: the title submits vertex-array and
+                       * texture state as incrementing packets.  The generic loop
+                       * re-enters rsx_process_method for every word, where each word
+                       * repeats the method histogram/trace gates and walks the main
+                       * dispatch chain before reaching one of two pure assignment
+                       * helpers.  Consume a packet here after the same complete-page
+                       * proof used by GCM_FIFO_DIRECT.
+                       *
+                       * This deliberately covers only ranges whose old handlers have
+                       * no callbacks, synchronization or ordering side effects.  Dirty
+                       * flags are monotonic until BEGIN_END flushes them, so setting a
+                       * range's flag once after the loop is identical to setting it on
+                       * every word.  All method-observation modes force the old path.
+                       * GCM_STATE_PACKET=0 is an immediate fallback; PHASE=1 gives an
+                       * even=new / odd=old in-run A/B without consuming an ABX bit. */
+                      { static int state_packet = -1, state_packet_phase = 0;
+                        if (__builtin_expect(state_packet < 0, 0)) {
+                            const char* e = getenv("GCM_STATE_PACKET");
+                            const char* p = getenv("GCM_STATE_PACKET_PHASE");
+                            state_packet = (e && *e == '1') ? 1 : 0;
+                            state_packet_phase = (p && *p == '1') ? 1 : 0;
+                            if (getenv("RSX_TRACE") || getenv("IMM_MTRACE") ||
+                                getenv("RSX_MHIST") || getenv("TCONST_DBG") ||
+                                getenv("SEQ_DBG")) state_packet = 0;
+                            fprintf(stderr, "[GCM] v245E state-packet dispatch %s (GCM_STATE_PACKET=1 on%s)%c",
+                                    state_packet ? "ON" : "off",
+                                    state_packet_phase ? "; phase even=new, odd=old" : "", 10);
+                        }
+                        const int state_packet_now = state_packet &&
+                            (!state_packet_phase || !(g_ab_phase & 1));
+                        if (state_packet_now && type == 0) {
+                            const u32 last_method = method + 4u * (count - 1u);
+                            if (method >= NV4097_SET_VERTEX_DATA_ARRAY_OFFSET &&
+                                last_method < NV4097_SET_VERTEX_DATA_ARRAY_OFFSET + RSX_MAX_VERTEX_ATTRIBS * 4u) {
+                                u32 index = (method - NV4097_SET_VERTEX_DATA_ARRAY_OFFSET) >> 2;
+                                for (u32 i = 0; i < count; i++)
+                                    s_state.vertex_attribs[index + i].offset = GCM_FIFO_ARG(i);
+                                s_state.vertex_dirty = 1;
+                                s_fifo_getoff += 4u + count * 4u;
+                                continue;
+                            }
+                            if (method >= NV4097_SET_VERTEX_DATA_ARRAY_FORMAT &&
+                                last_method < NV4097_SET_VERTEX_DATA_ARRAY_FORMAT + RSX_MAX_VERTEX_ATTRIBS * 4u) {
+                                u32 index = (method - NV4097_SET_VERTEX_DATA_ARRAY_FORMAT) >> 2;
+                                for (u32 i = 0; i < count; i++) {
+                                    const u32 d = GCM_FIFO_ARG(i);
+                                    rsx_vertex_attrib* const a = &s_state.vertex_attribs[index + i];
+                                    a->type = d & 0xFu;
+                                    a->size = (d >> 4) & 0xFu;
+                                    a->stride = (d >> 8) & 0xFFu;
+                                    a->frequency = (d >> 16) & 0xFFFFu;
+                                    a->enabled = (a->size != 0);
+                                    a->format = d;
+                                }
+                                s_state.vertex_dirty = 1;
+                                s_fifo_getoff += 4u + count * 4u;
+                                continue;
+                            }
+                            if (method >= NV4097_SET_TEXTURE_OFFSET &&
+                                last_method < NV4097_SET_TEXTURE_OFFSET + RSX_MAX_TEXTURES * 0x20u) {
+                                for (u32 i = 0; i < count; i++) {
+                                    const u32 m = method + i * 4u;
+                                    const u32 base = m - NV4097_SET_TEXTURE_OFFSET;
+                                    const u32 unit = base >> 5;
+                                    const u32 reg = base & 0x1Fu;
+                                    const u32 d = GCM_FIFO_ARG(i);
+                                    rsx_texture_state* const t = &s_state.textures[unit];
+                                    switch (reg) {
+                                    case 0x00: t->offset = d; break;
+                                    case 0x04: t->format = d; break;
+                                    case 0x08: t->address = d; break;
+                                    case 0x0C: t->control0 = d; break;
+                                    case 0x10: t->control1 = d; break;
+                                    case 0x14: t->filter = d; break;
+                                    case 0x18: t->image_rect = d; break;
+                                    case 0x1C: t->border_color = d; break;
+                                    }
+                                    t->dirty = 1;
+                                }
+                                s_state.texture_dirty = 1;
+                                s_fifo_getoff += 4u + count * 4u;
+                                continue;
+                            }
+                            /* v246B GCM_STATE_PACKET2=1 (default off; only acts where GCM_STATE_PACKET
+                             * is active, so it shares GCM_STATE_PACKET_PHASE: even=new, odd=old): two more
+                             * pure-assignment ranges from the perf181 [mhist] histogram.
+                             *  - SET_TRANSFORM_PROGRAM 0x0B80..0x0BFC (17.6 % of generic words): the
+                             *    rsx_process_method m_transform_program body, verbatim, per word in FIFO
+                             *    order (incl. the per-word v64 g_rsx_vp_gen bump and vp_dirty).
+                             *  - SET_TEXTURE_CONTROL3 0x1840..0x187C (2.3 %): process_texture_control3.
+                             * Packets must lie wholly inside one range; anything else falls through. */
+                            { static int sp2 = -1;
+                              if (__builtin_expect(sp2 < 0, 0)) {
+                                  const char* e2 = getenv("GCM_STATE_PACKET2");
+                                  sp2 = (e2 && *e2 == '1') ? 1 : 0;
+                                  fprintf(stderr, "[GCM] v246B state-packet ranges 2 (transform program, texture control3) %s (GCM_STATE_PACKET2=1 on)%c",
+                                          sp2 ? "ON" : "off", 10);
+                              }
+                              if (sp2) {
+                                  if (method >= NV4097_SET_TRANSFORM_PROGRAM &&
+                                      last_method < NV4097_SET_TRANSFORM_PROGRAM + 32u * 4u) {
+                                      extern volatile u32 g_rsx_vp_gen;
+                                      for (u32 i = 0; i < count; i++) {
+                                          const u32 d = GCM_FIFO_ARG(i);
+                                          const u32 w = s_state.vp_ucode_write;
+                                          if (w + 4 <= sizeof(s_state.vp_ucode)) {
+                                              { u32 old; memcpy(&old, &s_state.vp_ucode[w], 4);
+                                                if (old != d || w + 4 > s_state.vp_ucode_bytes) g_rsx_vp_gen++; }
+                                              s_state.vp_ucode[w+0] = (u8)(d);
+                                              s_state.vp_ucode[w+1] = (u8)(d >> 8);
+                                              s_state.vp_ucode[w+2] = (u8)(d >> 16);
+                                              s_state.vp_ucode[w+3] = (u8)(d >> 24);
+                                              s_state.vp_ucode_write = w + 4;
+                                              if (w + 4 > s_state.vp_ucode_bytes) s_state.vp_ucode_bytes = w + 4;
+                                              s_state.vp_dirty = 1;
+                                          }
+                                      }
+                                      s_fifo_getoff += 4u + count * 4u;
+                                      continue;
+                                  }
+                                  if (method >= NV4097_SET_TEXTURE_CONTROL3 &&
+                                      last_method < NV4097_SET_TEXTURE_CONTROL3 + RSX_MAX_TEXTURES * 4u) {
+                                      const u32 unit0 = (method - NV4097_SET_TEXTURE_CONTROL3) >> 2;
+                                      for (u32 i = 0; i < count; i++) {
+                                          s_state.textures[unit0 + i].control3 = GCM_FIFO_ARG(i);
+                                          s_state.textures[unit0 + i].dirty = 1;
+                                      }
+                                      s_state.texture_dirty = 1;
+                                      s_fifo_getoff += 4u + count * 4u;
+                                      continue;
+                                  }
+                              }
+                            }
                         }
                       }
                       /* v221C DCOAL (default ON; DCOAL=0 off; ABX 0x100000 = off for the in-run A/B): a NON-incrementing
@@ -2452,6 +2648,13 @@ static void gcm_rsx_process_fifo_unlocked(void)
     AcquireSRWLockExclusive(&s_ref_pub_lock);                           /* ref */
     gcm_ref_publish_one();
     ReleaseSRWLockExclusive(&s_ref_pub_lock);
+    if (__builtin_expect(v243c_rb, 0)) {   /* v243C RFBOUND */
+        LARGE_INTEGER q1; QueryPerformanceCounter(&q1);
+        s_v243c_busy += q1.QuadPart - v243c_q0.QuadPart;
+        if (s_v243c_open && s_fifo_getoff == put) {
+            g_v243c_st[8] += q1.QuadPart - s_v243c_t0q; g_v243c_st[9] += s_v243c_busy; g_v243c_st[10]++; s_v243c_open = 0;
+        }
+    }
 }
 
 /* FIFO command-buffer-full callback body. The title's inline gcmReserve calls

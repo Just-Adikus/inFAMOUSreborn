@@ -22,12 +22,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "rsx_ui_trainer.h"
+/* rsx_ui_trainer.h: the title's trainer page (F10); NULL = no trainer. */
+const uiov_trainer_api* volatile g_uiov_trainer = 0;
+
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
 #include <d3d12.h>
+#include "rsx_d3d12_abi.h"   /* struct-returning D3D12 calls for every Windows SDK */
 #include <d3dcompiler.h>
 #include <xinput.h>
 #include <math.h>
@@ -163,9 +168,15 @@ static volatile int s_menu_open = 0;            /* v194 settings menu (render th
 static volatile ULONGLONG s_menu_close_ms = 0;
 static volatile int s_menu_need_clear = 0;
 volatile int g_uiov_menu_open = 0;              /* read by cellPad.c (free the mouse, no Esc toggle) */
+static volatile int s_tr_open = 0;              /* F10 trainer page (render thread owns it) */
+static volatile ULONGLONG s_tr_close_ms = 0;
+static volatile int s_tr_need_clear = 0;
 int uiov_pad_gate(void)
 {
     if (s_menu_open) return 1;                   /* v194: the settings menu owns the pad */
+    if (s_tr_open) return 1;                     /* F10 trainer page owns the pad */
+    if (s_tr_close_ms && GetTickCount64() - s_tr_close_ms < 250) return 1;
+    if (s_tr_need_clear) { s_tr_need_clear = 0; return 2; }
     if (s_menu_close_ms && GetTickCount64() - s_menu_close_ms < 250) return 1;
     if (s_menu_need_clear) { s_menu_need_clear = 0; return 2; }
     if (s_cs_ready != 2) return 0;
@@ -465,7 +476,7 @@ static int gfx_init(ID3D12Device* dev, DXGI_FORMAT rtfmt)
     D3D12_SHADER_RESOURCE_VIEW_DESC sv = {0};
     sv.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; sv.Texture2D.MipLevels = 1;
-    D3D12_CPU_DESCRIPTOR_HANDLE ch; s_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_heap, &ch);
+    D3D12_CPU_DESCRIPTOR_HANDLE ch; RSX_D3D12_CPU_HEAP_START(s_heap)(s_heap, &ch);
     dev->lpVtbl->CreateShaderResourceView(dev, s_tex, &sv, ch);
 
     bdsc.Width = (UINT64)UIOV_MAX_VERTS * sizeof(UVert);
@@ -497,10 +508,12 @@ volatile int g_ui_kbm_glyphs = -1;   /* -1 env, 0 controller, 1 auto, 2 keyboard
 volatile int g_ui_mouse_speed = 0;   /* 0 env, else px/s for a full stick -- cellPad.c */
 volatile int g_set_vsync = -1;       /* -1 env, 0/1 -- rsx_d3d12_backend.c present_sync_interval */
 extern volatile int g_win_fullscreen;   /* rsx_d3d12_backend.c window proc (F11) */
+extern volatile int g_fs_cutscene_open; /* runtime/ppu/ppu_fs.cpp: story-cutscene movies open right now */
 int (*volatile g_uiov_paused_fn)(void) = 0;
 /* v195: set by the native pause-menu entries (stubs.cpp, script natives on the PPU thread): 1 = Settings, 2 = Quit Game */
 volatile int g_uiov_request = 0;
-typedef struct { const char* key; const char* label; int restart; int n; const char* val[8]; const char* name[8]; int cur, saved; } MItem;
+/* v243K: val/name 8 -> 12 (Language has 12 choices) */
+typedef struct { const char* key; const char* label; int restart; int n; const char* val[12]; const char* name[12]; int cur, saved; } MItem;
 static MItem s_mi[] = {
     { "FULLSCREEN",      "Display Mode",       0, 2, { "0", "1" }, { "Windowed", "Fullscreen" } },
     { "PRESENT_VSYNC",   "VSync",              0, 2, { "0", "1" }, { "Off", "On" } },
@@ -511,6 +524,24 @@ static MItem s_mi[] = {
     { "SHADOWS",         "Shadows",            1, 2, { "1", "0" }, { "On", "Off" } },
     { "TEX_ANISO",       "Texture Filtering",  1, 5, { "-1", "0", "4", "8", "16" }, { "Game Default", "Bilinear", "4x Anisotropic", "8x Anisotropic", "16x Anisotropic" } },
     { "TEX_MIPS",        "Mipmaps",            1, 2, { "1", "0" }, { "On", "Off" } },
+    /* v243K (from PR #25): DLSS / FSR upscaling and FSR frame generation -- rows exist only in a build made with the
+     * NVIDIA DLSS SDK (PS3RECOMP_NGX) and/or the AMD FSR SDK (PS3RECOMP_FFX); rsx_dlss.cpp reads UPSCALER / FSR_FG. */
+#if defined(PS3RECOMP_NGX) && defined(PS3RECOMP_FFX)
+    { "UPSCALER",        "Upscaling",          1, 9, { "off", "dlaa", "dlss_quality", "dlss_balanced", "dlss_performance", "fsr_native", "fsr_quality", "fsr_balanced", "fsr_performance" },
+                                                     { "Off", "NVIDIA DLAA", "DLSS Quality", "DLSS Balanced", "DLSS Performance", "FSR Native AA", "FSR Quality", "FSR Balanced", "FSR Performance" } },
+#elif defined(PS3RECOMP_NGX)
+    { "UPSCALER",        "Upscaling",          1, 5, { "off", "dlaa", "dlss_quality", "dlss_balanced", "dlss_performance" },
+                                                     { "Off", "NVIDIA DLAA", "DLSS Quality", "DLSS Balanced", "DLSS Performance" } },
+#elif defined(PS3RECOMP_FFX)
+    { "UPSCALER",        "Upscaling",          1, 5, { "off", "fsr_native", "fsr_quality", "fsr_balanced", "fsr_performance" },
+                                                     { "Off", "FSR Native AA", "FSR Quality", "FSR Balanced", "FSR Performance" } },
+#endif
+#ifdef PS3RECOMP_FFX
+    { "FSR_FG",          "Frame Generation",   1, 2, { "0", "1" }, { "Off", "On (FSR)" } },
+#endif
+    /* v243K (from PR #25): game language (dialogue, subtitles, HUD); cellSysutil.c + infamous_lang.h read PS3_LANG */
+    { "PS3_LANG",        "Language",           1, 12, { "english", "british", "french", "german", "italian", "spanish", "dutch", "polish", "portuguese", "russian", "korean", "chinese_t" },
+                                                      { "English (US)", "English (UK)", "French", "German", "Italian", "Spanish", "Dutch", "Polish", "Portuguese", "Russian", "Korean (text)", "Chinese (text)" } },
 };
 #define MI_N ((int)(sizeof s_mi / sizeof s_mi[0]))
 enum { MR_RESUME = MI_N, MR_QUIT = MI_N + 1, MR_N = MI_N + 2 };
@@ -544,7 +575,7 @@ static void menu_save(void)
 {
     FILE* f = fopen("settings.ini", "w");
     if (!f) { fprintf(stderr, "[settings] could not write settings.ini\n"); return; }
-    fprintf(f, "; inFamous recomp settings (written by the in-game Settings menu, F10). Loaded at startup; overrides the launcher.\n");
+    fprintf(f, "; inFamous recomp settings (written by the in-game Settings menu, pause menu > Settings). Loaded at startup; overrides the launcher.\n");
     for (int i = 0; i < MI_N; i++) fprintf(f, "%s=%s\n", s_mi[i].key, s_mi[i].val[s_mi[i].cur]);
     fclose(f);
     fprintf(stderr, "[settings] saved settings.ini\n");
@@ -605,7 +636,7 @@ static int menu_tick(HWND hwnd, unsigned bbw, unsigned bbh)
     if (!s_menu_inited) menu_init(hwnd);
     const int fg = hwnd && GetForegroundWindow() == hwnd;
     static int f10_was, sel_was, lb_was, rb_was;
-    const int f10 = fg && (GetAsyncKeyState(VK_F10) & 0x8000);
+    const int f10 = 0;   /* F10 = trainer page now; Settings opens from the pause menu (g_uiov_request) */
     const int paused = g_uiov_paused_fn ? g_uiov_paused_fn() : 0;
     if (!s_menu_open) {
         int open = f10 && !f10_was;
@@ -616,7 +647,7 @@ static int menu_tick(HWND hwnd, unsigned bbw, unsigned bbh)
         static int hint_env = -1;
         if (hint_env < 0) { const char* e = getenv("UI_PAUSE_HINT"); hint_env = e && *e == '1'; }
         s_hint_on = hint_env && paused && !D.active;
-        s_wm_on = paused && !D.active;   /* v238 pause-screen watermark */
+        s_wm_on = paused && !D.active && !g_fs_cutscene_open;   /* v238 pause-screen watermark; not in cutscenes */
         if (s_hint_on) {
             unsigned in = read_input(hwnd);   /* only polled while paused (XInput on empty slots is slow) */
             if ((in & IN_SELECT) && !sel_was) open = 1;
@@ -711,7 +742,7 @@ static void build_watermark(void)
 }
 static void build_hint(void)
 {
-    const char* t = "F10 / Back   Settings & Quit";
+    const char* t = "Back   Settings & Quit";
     float sz = 22.0f, w = text_width(t, (int)strlen(t), sz), x1 = s_vw - 40.0f, x0 = x1 - w - 32.0f, y0 = 30.0f, y1 = y0 + 40.0f;   /* top-right: the game's pause screen keeps that black bar empty */
     float c0[4], c1[4], wt[4];
     rgba(c0, 0, 0, 0, 0.55f); rect(x0, y0, x1, y1, c0, c0, 0);
@@ -723,7 +754,9 @@ static void build_hint(void)
 static void build_menu(void)
 {
     static const float BLUE[3] = { 0.36f, 0.72f, 1.0f };
-    const float cx = s_vw * 0.5f, rh = 40.0f, lsz = 26.0f;
+    /* v243K: rows shrink when the list grows (720-unit virtual height): 40 units / 26 pt up to 11 rows */
+    const float rh = MR_N <= 11 ? 40.0f : (376.0f / (float)MR_N > 30.0f ? 376.0f / (float)MR_N : 30.0f);
+    const float cx = s_vw * 0.5f, lsz = rh * 0.65f;
     float c0[4], c1[4], wt[4], gr[4], bl[4];
     if (s_menu_quitonly) {   /* v195: "Quit Game" from the pause menu: only the confirmation */
         rgba(wt, 0.97f, 0.97f, 0.97f, 1); rgba(gr, 0.60f, 0.60f, 0.60f, 1); rgba(bl, BLUE[0], BLUE[1], BLUE[2], 1);
@@ -743,9 +776,9 @@ static void build_menu(void)
     text_draw(title, 8, cx - text_width(title, 8, 38.0f) * 0.5f, top + 14.0f, 38.0f, wt);
     const float x0 = cx - 400.0f, x1 = cx + 400.0f;
     s_row_x0 = x0 - 20.0f; s_row_x1 = x1 + 20.0f;
-    float y = top + 72.0f;
+    float y = top + (MR_N <= 11 ? 72.0f : 62.0f);
     for (int r = 0; r < MR_N; r++) {
-        if (r == MR_RESUME) y += 14.0f;
+        if (r == MR_RESUME) y += MR_N <= 11 ? 14.0f : 6.0f;
         const int on = (r == s_menu_sel) && !s_menu_confirm;
         s_row_y0[r] = y - 4.0f; s_row_y1[r] = y + rh - 4.0f;
         if (on) { rgba(c0, BLUE[0], BLUE[1], BLUE[2], 0.0f); rgba(c1, BLUE[0], BLUE[1], BLUE[2], 0.22f);
@@ -756,7 +789,7 @@ static void build_menu(void)
             const MItem* m = &s_mi[r];
             text_draw(m->label, (int)strlen(m->label), x0, y, lsz, col);
             if (m->restart) { const char* rs = "(restart)"; float lw = text_width(m->label, (int)strlen(m->label), lsz);
-                              float g2[4]; rgba(g2, 0.45f, 0.45f, 0.45f, 1); text_draw(rs, 9, x0 + lw + 12.0f, y + 6.0f, 18.0f, g2); }
+                              float g2[4]; rgba(g2, 0.45f, 0.45f, 0.45f, 1); text_draw(rs, 9, x0 + lw + 12.0f, y + rh * 0.15f, lsz * 0.7f, g2); }   /* v243K: scales with the row */
             char v[96]; snprintf(v, sizeof v, "%s   %s   %s", on ? "<" : " ", m->name[m->cur], on ? ">" : " ");
             text_draw(v, (int)strlen(v), x1 - text_width(v, (int)strlen(v), lsz), y, lsz, on ? wt : gr);
         } else {
@@ -787,6 +820,172 @@ confirm:
             if (i == s_menu_csel) rect(bx - 10, by1 - 26.0f, bx + text_width(yn[i], (int)strlen(yn[i]), 28.0f) + 10, by1 - 24.0f, bl, bl, 0);
         }
     }
+}
+/* ---------------- F10 trainer page (rsx_ui_trainer.h) ----------------
+ * The title supplies the rows (g_uiov_trainer); this draws them in a left-side panel so the game stays visible, owns
+ * the pad while open (uiov_pad_gate) and turns input into change() calls.  While closed it draws the title's short
+ * "active cheats" line (hud) at the top centre, except on the pause screen. */
+#define TR_MAX_ROWS 64
+static int s_tr_sel = -1, s_tr_scroll;
+static unsigned s_tr_prev, s_tr_rep_key;
+static ULONGLONG s_tr_t_open, s_tr_rep_t;
+static float s_tr_y0[TR_MAX_ROWS], s_tr_y1[TR_MAX_ROWS], s_tr_x0, s_tr_x1;   /* last layout, for the mouse */
+static int s_tr_hud_on; static char s_tr_hud[128];
+static int tr_row(const uiov_trainer_api* t, int i, uiov_trainer_row* r)
+{
+    memset(r, 0, sizeof *r);
+    return t->row(i, r);
+}
+static int tr_selectable(const uiov_trainer_api* t, int i)
+{
+    uiov_trainer_row r;
+    return tr_row(t, i, &r) && r.kind != UIOV_TR_HEADER;
+}
+static void tr_move(const uiov_trainer_api* t, int n, int d)
+{
+    if (n <= 0) { s_tr_sel = -1; return; }
+    int i = s_tr_sel < 0 ? (d > 0 ? -1 : 0) : s_tr_sel;
+    for (int k = 0; k < n; k++) { i = (i + d + n) % n; if (tr_selectable(t, i)) { s_tr_sel = i; return; } }
+    s_tr_sel = -1;
+}
+static void tr_open(void)
+{
+    s_tr_open = 1; g_uiov_menu_open = 1; s_tr_t_open = GetTickCount64(); s_tr_prev = 0xFFFFFFFFu; s_tr_rep_key = 0;
+    fprintf(stderr, "[trainer] open\n");
+}
+static void tr_close(void)
+{
+    s_tr_open = 0; g_uiov_menu_open = 0; s_tr_close_ms = GetTickCount64(); s_tr_need_clear = 1;
+    fprintf(stderr, "[trainer] closed\n");
+}
+/* returns 1 when the page (or the active-cheat line) wants to draw this frame */
+static int tr_tick(HWND hwnd, unsigned bbw, unsigned bbh)
+{
+    const uiov_trainer_api* t = g_uiov_trainer;
+    static int f10_was, lb_was, rb_was;
+    if (!t) { s_tr_hud_on = 0; if (s_tr_open) tr_close(); return 0; }
+    const int fg = hwnd && GetForegroundWindow() == hwnd;
+    const int f10 = fg && (GetAsyncKeyState(VK_F10) & 0x8000);
+    const int press = f10 && !f10_was;
+    f10_was = f10;
+    if (!s_tr_open) {
+        if (press && !D.active && !s_menu_open) tr_open();
+        else { s_tr_hud_on = t->hud ? t->hud(s_tr_hud, sizeof s_tr_hud) : 0; return s_tr_hud_on; }
+    } else if (press) { tr_close(); return 0; }
+    s_tr_hud_on = 0;
+    int n = t->count ? t->count() : 0; if (n > TR_MAX_ROWS) n = TR_MAX_ROWS;
+    if (s_tr_sel < 0 || s_tr_sel >= n || !tr_selectable(t, s_tr_sel)) { s_tr_sel = -1; tr_move(t, n, +1); }
+    /* keys / pad */
+    const ULONGLONG now = GetTickCount64();
+    unsigned in = read_input(hwnd);
+    if (s_tr_prev == 0xFFFFFFFFu) s_tr_prev = in;   /* keys held at open are ignored */
+    unsigned dn = in & ~s_tr_prev; s_tr_prev = in;
+    if (now - s_tr_t_open < 150) dn = 0;
+    { const unsigned dirs = in & (IN_UP | IN_DOWN | IN_LEFT | IN_RIGHT);   /* held direction auto-repeat */
+      if (dn & dirs) { s_tr_rep_key = dn & dirs; s_tr_rep_t = now + 350; }
+      else if (dirs & s_tr_rep_key) { if (now >= s_tr_rep_t) { dn |= dirs & s_tr_rep_key; s_tr_rep_t = now + 80; } }
+      else s_tr_rep_key = 0; }
+    if (dn & IN_UP)   tr_move(t, n, -1);
+    if (dn & IN_DOWN) tr_move(t, n, +1);
+    if (s_tr_sel >= 0) {
+        uiov_trainer_row r;
+        if (tr_row(t, s_tr_sel, &r)) {
+            if (r.kind == UIOV_TR_CHOICE) {
+                if (dn & IN_LEFT) t->change(s_tr_sel, -1);
+                if (dn & (IN_RIGHT | IN_OK)) t->change(s_tr_sel, +1);
+            } else if (r.kind == UIOV_TR_ACTION && (dn & IN_OK)) t->change(s_tr_sel, 0);
+        }
+    }
+    if (dn & (IN_BACK | IN_SELECT)) { tr_close(); return 0; }
+    /* mouse: hover selects, left click = next value / run, right click = previous value */
+    { float vx, vy; static POINT s_last;
+      const int lb = fg && (GetAsyncKeyState(VK_LBUTTON) & 0x8000), rb = fg && (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
+      if (mouse_virt(hwnd, bbw, bbh, &vx, &vy) && vx >= s_tr_x0 && vx <= s_tr_x1) {
+          POINT pt; GetCursorPos(&pt);
+          for (int i = 0; i < n; i++) {
+              if (!(s_tr_y1[i] > s_tr_y0[i] && vy >= s_tr_y0[i] && vy <= s_tr_y1[i])) continue;
+              uiov_trainer_row r;
+              if (!tr_row(t, i, &r) || r.kind == UIOV_TR_HEADER) continue;
+              if (pt.x != s_last.x || pt.y != s_last.y) s_tr_sel = i;
+              if (lb && !lb_was) { if (r.kind == UIOV_TR_CHOICE) t->change(i, +1); else if (r.kind == UIOV_TR_ACTION) t->change(i, 0); }
+              if (rb && !rb_was && r.kind == UIOV_TR_CHOICE) t->change(i, -1);
+          }
+          s_last = pt;
+      }
+      lb_was = lb; rb_was = rb; }
+    return 1;
+}
+static void build_trainer(void)
+{
+    const uiov_trainer_api* t = g_uiov_trainer;
+    if (!t) return;
+    static const float BLUE[3] = { 0.36f, 0.72f, 1.0f };
+    float c0[4], c1[4], wt[4], gr[4], dim[4], bl[4], grn[4];
+    rgba(wt, 0.97f, 0.97f, 0.97f, 1); rgba(gr, 0.62f, 0.62f, 0.62f, 1); rgba(dim, 0.40f, 0.40f, 0.40f, 1);
+    rgba(bl, BLUE[0], BLUE[1], BLUE[2], 1); rgba(grn, 0.55f, 1.0f, 0.55f, 1);
+    const float px0 = 32.0f, px1 = px0 + 600.0f, top = 36.0f, bot = UIOV_VW_H - 36.0f;
+    rgba(c0, 0, 0, 0, 0.84f); rgba(c1, 0, 0, 0, 0.0f);
+    rect(px0, top, px1, bot, c0, c0, 0);
+    rect(px1, top, px1 + 48.0f, bot, c0, c1, 1);
+    rect(px0, top, px1, top + 2, bl, bl, 0);
+    rect(px0, bot - 2, px1, bot, bl, bl, 0);
+    const float x0 = px0 + 30.0f, x1 = px1 - 30.0f;
+    const char* title = t->title ? t->title : "TRAINER";
+    text_draw(title, (int)strlen(title), x0, top + 16.0f, 34.0f, wt);
+    float y = top + 62.0f;
+    { char st[128]; if (t->status && t->status(st, sizeof st)) text_draw(st, (int)strlen(st), x0, y, 19.0f, bl); }
+    y += 36.0f;
+    const float rh = 31.0f, lsz = 21.0f, list_bot = bot - 44.0f;
+    s_tr_x0 = px0; s_tr_x1 = px1;
+    int n = t->count ? t->count() : 0; if (n > TR_MAX_ROWS) n = TR_MAX_ROWS;
+    int vis = (int)((list_bot - y) / rh); if (vis < 1) vis = 1;
+    if (s_tr_sel >= 0) {
+        if (s_tr_sel < s_tr_scroll) s_tr_scroll = s_tr_sel;
+        if (s_tr_sel >= s_tr_scroll + vis) s_tr_scroll = s_tr_sel - vis + 1;
+        if (s_tr_scroll > 0 && s_tr_sel == s_tr_scroll) {   /* keep a section title above the selection visible */
+            uiov_trainer_row h; if (tr_row(t, s_tr_scroll - 1, &h) && h.kind == UIOV_TR_HEADER) s_tr_scroll--; }
+    }
+    if (s_tr_scroll > n - vis) s_tr_scroll = n - vis > 0 ? n - vis : 0;
+    for (int i = 0; i < TR_MAX_ROWS; i++) s_tr_y0[i] = s_tr_y1[i] = 0.0f;
+    if (s_tr_scroll > 0) text_draw("...", 3, x1 - text_width("...", 3, lsz), y - 26.0f, lsz, gr);
+    for (int i = s_tr_scroll; i < n && i < s_tr_scroll + vis; i++, y += rh) {
+        uiov_trainer_row r;
+        if (!tr_row(t, i, &r)) continue;
+        if (r.kind == UIOV_TR_HEADER) {
+            text_draw(r.label, (int)strlen(r.label), x0, y + 8.0f, 17.0f, bl);
+            rgba(c0, BLUE[0], BLUE[1], BLUE[2], 0.30f); rect(x0, y + rh - 5.0f, x1, y + rh - 4.0f, c0, c0, 0);
+            continue;
+        }
+        const int on = i == s_tr_sel, locked = r.kind == UIOV_TR_LOCKED;
+        s_tr_y0[i] = y - 4.0f; s_tr_y1[i] = y + rh - 4.0f;
+        if (on) {
+            rgba(c0, BLUE[0], BLUE[1], BLUE[2], 0.0f); rgba(c1, BLUE[0], BLUE[1], BLUE[2], 0.26f);
+            rect(x0 - 16.0f, y - 4.0f, x1 + 16.0f, y + rh - 6.0f, c1, c0, 1);
+            rect(x0 - 16.0f, y - 4.0f, x0 - 12.0f, y + rh - 6.0f, bl, bl, 0);
+        }
+        text_draw(r.label, (int)strlen(r.label), x0, y, lsz, locked ? dim : on ? wt : gr);
+        char v[96];
+        if (r.kind == UIOV_TR_CHOICE) snprintf(v, sizeof v, "%s  %s  %s", on ? "<" : " ", r.value, on ? ">" : " ");
+        else snprintf(v, sizeof v, "%s", r.value);
+        if (*v) {
+            const float vsz = locked ? lsz * 0.78f : lsz;
+            const float* vc = locked ? dim : (r.kind == UIOV_TR_CHOICE && r.on) ? grn : on ? wt : gr;
+            text_draw(v, (int)strlen(v), x1 - text_width(v, (int)strlen(v), vsz), y + (lsz - vsz) * 0.5f, vsz, vc);
+        }
+    }
+    if (s_tr_scroll + vis < n) text_draw("...", 3, x1 - text_width("...", 3, lsz), y - 8.0f, lsz, gr);
+    const char* foot = "Up/Down select   Left/Right change   Enter run   F10/Esc close";
+    text_draw(foot, (int)strlen(foot), x0, bot - 32.0f, 15.0f, gr);
+}
+static void tr_hud_build(void)
+{
+    if (!s_tr_hud_on || !s_tr_hud[0]) return;
+    const int len = (int)strlen(s_tr_hud);
+    const float sz = 17.0f, w = text_width(s_tr_hud, len, sz), x0 = (s_vw - w) * 0.5f - 12.0f, y0 = 6.0f;
+    float bg[4], fg[4];
+    rgba(bg, 0, 0, 0, 0.45f); rgba(fg, 0.55f, 1.0f, 0.55f, 0.92f);
+    rect(x0, y0, x0 + w + 24.0f, y0 + 28.0f, bg, bg, 0);
+    text_draw(s_tr_hud, len, x0 + 12.0f, y0 + 14.0f - sz * 0.62f, sz, fg);
 }
 static void uiov_draw_list(ID3D12GraphicsCommandList* cl, D3D12_CPU_DESCRIPTOR_HANDLE rtv, unsigned bbw, unsigned bbh);
 /* v212 F1 FPS counter: frames this overlay was drawn for (= presented guest frames), averaged over 0.5 s, top-left. */
@@ -828,11 +1027,15 @@ void uiov_render(ID3D12Device* dev, ID3D12GraphicsCommandList* cl, D3D12_CPU_DES
     /* v194: settings menu / pause hint (when no system dialog is up) */
     if (!D.active && font_load()) {
         s_k = bbh / UIOV_VW_H; s_vw = bbw / s_k;
-        if (menu_tick(hwnd, bbw, bbh) && gfx_init(dev, rtfmt)) {
+        int want = s_menu_open ? 0 : tr_tick(hwnd, bbw, bbh);   /* F10 trainer page / active-cheat line */
+        if (!s_tr_open) want |= menu_tick(hwnd, bbw, bbh);
+        if (want && gfx_init(dev, rtfmt)) {
             s_last_draw_ms = GetTickCount64();
             s_vbi = (s_vbi + 1) % UIOV_FRAMES;
             s_v = s_vbmap[s_vbi]; s_nv = 0;
-            if (s_menu_open) build_menu(); else { if (s_hint_on) build_hint(); if (s_wm_on) build_watermark(); }   /* v238 */
+            if (s_tr_open) build_trainer();
+            else if (s_menu_open) build_menu();
+            else { if (s_hint_on) build_hint(); if (s_wm_on) build_watermark(); else tr_hud_build(); }   /* v238 */
             fps_build();   /* v212 */
             if (s_nv) uiov_draw_list(cl, rtv, bbw, bbh);
             return;
@@ -932,7 +1135,7 @@ static void uiov_draw_list(ID3D12GraphicsCommandList* cl, D3D12_CPU_DESCRIPTOR_H
     cl->lpVtbl->RSSetScissorRects(cl, 1, &sc);
     cl->lpVtbl->SetGraphicsRootSignature(cl, s_rs);
     cl->lpVtbl->SetDescriptorHeaps(cl, 1, &s_heap);
-    D3D12_GPU_DESCRIPTOR_HANDLE gh; s_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_heap, &gh);
+    D3D12_GPU_DESCRIPTOR_HANDLE gh; RSX_D3D12_GPU_HEAP_START(s_heap)(s_heap, &gh);
     cl->lpVtbl->SetGraphicsRootDescriptorTable(cl, 1, gh);
     float so[4] = { 2.0f / s_vw, 2.0f / UIOV_VW_H, 0, 0 };
     cl->lpVtbl->SetGraphicsRoot32BitConstants(cl, 0, 4, so, 0);

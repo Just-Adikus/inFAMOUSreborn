@@ -45,6 +45,7 @@
 extern "C" uint32_t ppu_prof_resolve_host(void* ra);
 extern "C" uint32_t ppu_active_lr(void);
 extern "C" int ps3_stdout_immediate(void);  /* runner-owned stdout policy (main.cpp) */
+extern "C" int v243a_lean_require(void);     /* spu_coherency.c; used by PORT_PPU_MEMLEAN=ALL */
 extern "C" PpuStoreObserver g_ppu_store_observer = {};
 
 /* Resolve the GUEST function on the host stack (closest lifted entry below
@@ -2059,6 +2060,10 @@ extern "C" uint32_t g_barrier_sync_watch = 0;
  * setting as below; kept as a pair so the inline check is two compares against
  * zeros when the watch is off. */
 extern "C" uint32_t g_ww_lo = 0, g_ww_hi = 0;
+/* Live retarget of PPU_WWATCH (MEMCMD "wwatch <ea> [len]", cellPad.c): 0 = use the launch value.  Launch with
+ * PPU_WWATCH set (any address) so every guest store takes the watched path; then aim it once the target exists
+ * (heap objects move between sessions).  g_ww_live_gen restarts the print count and the first-hit stack dump. */
+extern "C" { volatile uint32_t g_ww_live = 0, g_ww_live_len = 0x20; volatile long g_ww_live_gen = 0; }
 
 extern "C" void ps3_ww_report_inline(uint32_t addr, uint64_t val, int width)
 {
@@ -2141,7 +2146,8 @@ static inline void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra
       if (!s_wwlen) { const char* e2 = getenv("PPU_WWATCH_LEN");
                       s_wwlen = e2 ? (uint32_t)strtoul(e2,0,0) : 0x20;
                       if (s_wwlen < 0x20) s_wwlen = 0x20; }
-      if (s_ww && a >= (s_ww & ~15u) && a < (s_ww & ~15u) + s_wwlen) {
+      const uint32_t ww_t = g_ww_live ? g_ww_live : s_ww, ww_l = g_ww_live ? g_ww_live_len : s_wwlen;
+      if (ww_t && a >= (ww_t & ~15u) && a < (ww_t & ~15u) + ww_l) {
           /* PPU_WW_GUARD=1: once the watched word is first SET, page-guard it.
            * The store watch only sees lifted guest stores -- a host-side memset
            * or an atomic clears a field invisibly. flOw loses its render config
@@ -2169,6 +2175,7 @@ static inline void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra
           static long _cap = -1;
           if (_cap < 0) { const char* e = getenv("PPU_WWATCH_MAX");
                           _cap = e ? atol(e) : 64; }
+          { static long _gen_seen = 0; if (g_ww_live_gen != _gen_seen) { _gen_seen = g_ww_live_gen; _n = 0; } }
           long _i = ++_n;
           if (_cap == 0 || _i <= _cap) {
               /* guest lr and tid as well as the host-sampled function. The
@@ -2260,6 +2267,15 @@ extern "C" void ppu_stvx16(uint32_t ea, const void* src)
 {
     ea &= ~0xFu;
     if (vm_oob(ea, 16)) return;
+    /* trainer session 3: PPU_WWATCH was blind to vector stores (Cole's velocity is written with stvx).  With the
+     * watch on, the inline stvx gate is closed (g_ppu_vst_lim2 follows the scalar gate), so every stvx lands here. */
+    if (!VM_FAST() || g_barrier_sync_watch) {   /* PPU_WWATCH set -> slow accessors -> inline stvx closed too */
+        const uint8_t* b = (const uint8_t*)src;
+        for (int i = 0; i < 4; ++i) {
+            const uint32_t w = ((uint32_t)b[4*i] << 24) | ((uint32_t)b[4*i+1] << 16) | ((uint32_t)b[4*i+2] << 8) | b[4*i+3];
+            barrier_watch_hit(ea + 4u * (uint32_t)i, w, 4, __builtin_return_address(0));
+        }
+    }
     VM_WRITE_COH(ea, src, 16);
 }
 extern "C" void ppu_dcbz128(uint32_t ea)
@@ -5427,6 +5443,14 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
      * the buffer for minutes and were LOST when the run was killed -- which
      * made "the log line is absent" unusable as evidence. */
     setvbuf(stdout, NULL, _IONBF, 0);
+
+#ifdef PORT_PPU_MEMLEAN_ALL
+    /* v245: initialise vm_fast limits and the reservation mirror before a
+     * dispatcher-free lean lifted body can execute. VM_FAST() normally does
+     * this lazily on the first old accessor, which ALL intentionally removes. */
+    (void)vm_fast_init();
+    if (!v243a_lean_require()) return -2;
+#endif
 
     g_ppu_thread_entry_trampoline = ppu_thread_entry_trampoline;
     uint32_t code = 0, toc = 0;
