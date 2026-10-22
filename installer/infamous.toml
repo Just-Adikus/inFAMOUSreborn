@@ -292,7 +292,8 @@ exclude = [
   # the files of the 2026-10-18 setup's extra mod (see [update] obsolete)
   "**/*skate*", "**/*skate*/",
   # maintainer-only notes, audits, bench tooling and helper scripts
-  "**/HANDOFF*.md", "**/AGENTS_*.md", "**/COORD_*.md", "**/THREAD_PERF*.md",
+  "**/*HANDOFF*", "**/*handoff*", "**/*AGENT*", "**/*agent*",
+  "**/*COORD*", "**/*coord*", "**/*THREAD_PERF*", "**/*thread_perf*",
   "INFAMOUS_*.md", "PS3_PORTING_PLAYBOOK.md",
   "infamous-recomp/tools/bench/", "ps3recomp/scratch/",
   "START_BENCH_RUNNER.cmd", "publish-github.cmd", "repackage-setup.cmd",
@@ -316,7 +317,9 @@ keep = [
 # error if the rules above would let any of them through.
 forbid = [
   "**/*skate*", "**/*skate*/**",
-  "**/HANDOFF*.md", "**/AGENTS_*.md", "INFAMOUS_*.md", "_audit_*/**",
+  "**/*HANDOFF*", "**/*handoff*", "**/*AGENT*", "**/*agent*",
+  "**/*COORD*", "**/*coord*", "**/*THREAD_PERF*", "**/*thread_perf*",
+  "INFAMOUS_*.md", "_audit_*/**",
   "**/gamedata*/**", "**/savedata*/**", "**/dev_hdd0/**",
 ]
 

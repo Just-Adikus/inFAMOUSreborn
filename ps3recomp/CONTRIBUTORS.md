@@ -412,13 +412,3 @@ Gave the project its first CI and its second platform, in **v0.9.0**.
   standalone library by the [PPSSPP](https://github.com/hrydgard/ppsspp) project
   (`ext/at3_standalone`). LGPL-2.1-or-later, kept as a separable component; see
   its `README.txt` and `COPYING.LGPLv2.1`.
-
----
-
-## A note on AI-assisted contributions
-
-Parts of this project — and some contributions to it — were developed with the
-help of AI coding tools. That's welcome here: what matters is that every change
-is understood, reviewed, and verified by a human before it lands. If you used an
-assistant, just say so in your PR (several contributors have) and make sure
-you can stand behind the result.

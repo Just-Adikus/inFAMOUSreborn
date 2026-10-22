@@ -386,7 +386,7 @@ Retarget s_rt;
 
 bool standin_live() { return s_si && s_rt_ok; }
 
-/* The stand-in is FROZEN: every one of its update entities (AI, locomotion/anim feed, ...) is skipped by
+/* The stand-in is FROZEN: every one of its behavior and locomotion/animation updates is skipped by
  * trainer_entity_hook (below), so it cannot walk, fight or animate on its own; render prep still runs.
  * Session 6 in-game test without this: spawned Zeke (enemy class) / Kessler (boss) attacked Cole, kept their own
  * pose beside him and the camera went wild. */

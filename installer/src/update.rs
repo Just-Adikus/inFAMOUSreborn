@@ -1018,6 +1018,10 @@ mod v246_tests {
             "ps3recomp/libs/video/rsx_skate_actor.h",
             "infamous-recomp/tools/bench/skate_drive.ps1",
             "infamous-recomp/HANDOFF_v246.md",
+            "infamous-recomp/handoff_private.txt",
+            "infamous-recomp/AGENT_NOTES.rst",
+            "infamous-recomp/coord_session.md",
+            "infamous-recomp/thread_perf_notes.txt",
             "INFAMOUS_CODE_PROVENANCE_AUDIT.md",
             "infamous-recomp/gamedata-test/dev_hdd0/home/00000001/savedata/BLES00000_INFAMOUS_0/STATE",
         ] {

@@ -251,9 +251,6 @@ compatible with MIT (MIT, BSD, zlib, Apache-2.0, public domain). Specifically:
 - **If something came from elsewhere, say so in the PR**, with a link, and
   keep any copyright header. A licence problem found at review costs a
   comment; one found after release means untangling history.
-- The same applies to AI-assisted code: if it looks like it reproduces an
-  existing project, check where it came from before submitting it.
-
 ## Questions?
 
 Open a [GitHub Discussion](https://github.com/sp00nznet/ps3recomp/discussions) or file an issue. We're a small community but we're responsive.

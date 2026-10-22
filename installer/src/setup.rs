@@ -815,6 +815,7 @@ fn run_update(
             dir.display()
         ));
     }
+    remove_internal_documents(dir, &log);
     set(0.01, "Checking GitHub for a new version", "");
     let mut cmd = Command::new(&cli);
     cmd.arg("update").arg("--root").arg(dir);
@@ -887,6 +888,7 @@ fn install(
     // 1. The port's files.
     std::fs::create_dir_all(&o.location)
         .map_err(|e| format!("can't create {}: {e}", o.location.display()))?;
+    remove_internal_documents(&o.location, &log);
     set(0.0, "Copying the PC port's files", "");
     let placed = place_files(&o.source, &o.location, &mut |d, t| {
         set(0.03 * d as f32 / t.max(1) as f32, "", "")
@@ -1003,6 +1005,45 @@ fn install(
         add_update_shortcut(&o.location, &o.game_title, &log);
     }
     Ok(())
+}
+
+/// Remove maintainer-only coordination documents left by older packages. These are never player
+/// files and must not survive a repair/update just because an old setup placed them first.
+fn remove_internal_documents(root: &Path, log: &dyn Fn(String)) {
+    fn visit(dir: &Path, removed: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                visit(&path, removed);
+                continue;
+            }
+            if !kind.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            let private = name.contains("handoff")
+                || name.starts_with("agents_")
+                || name.starts_with("coord_")
+                || name.starts_with("thread_perf");
+            if private && std::fs::remove_file(&path).is_ok() {
+                removed.push(path);
+            }
+        }
+    }
+
+    let mut removed = Vec::new();
+    for dir in [root.join("infamous-recomp"), root.join(".installer")] {
+        visit(&dir, &mut removed);
+    }
+    for path in removed {
+        log(format!("Removed internal document: {}", path.display()));
+    }
 }
 
 /// Run the command-line installer, mapping its output to the progress bar and log.
@@ -1214,5 +1255,35 @@ mod tests {
             phase_for("Compiling -- the lifted code is huge; expect a long first build").is_some()
         );
         assert!(phase_for("something else").is_none());
+    }
+
+    #[test]
+    fn repair_removes_internal_documents() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("internal-doc-cleanup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("infamous-recomp/notes")).unwrap();
+        std::fs::create_dir_all(root.join(".installer/old")).unwrap();
+        std::fs::write(root.join("infamous-recomp/HANDOFF_old.md"), b"private").unwrap();
+        std::fs::write(
+            root.join("infamous-recomp/notes/coord_session.txt"),
+            b"private",
+        )
+        .unwrap();
+        std::fs::write(root.join(".installer/old/AGENTS_notes.md"), b"private").unwrap();
+        std::fs::write(root.join("infamous-recomp/README.md"), b"public").unwrap();
+        let lines = Mutex::new(Vec::new());
+
+        remove_internal_documents(&root, &|line| lines.lock().unwrap().push(line));
+
+        assert!(!root.join("infamous-recomp/HANDOFF_old.md").exists());
+        assert!(!root
+            .join("infamous-recomp/notes/coord_session.txt")
+            .exists());
+        assert!(!root.join(".installer/old/AGENTS_notes.md").exists());
+        assert!(root.join("infamous-recomp/README.md").exists());
+        assert_eq!(lines.lock().unwrap().len(), 3);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
