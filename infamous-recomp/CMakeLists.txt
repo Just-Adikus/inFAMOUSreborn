@@ -36,9 +36,33 @@ elseif(PORT_PGO STREQUAL "USE")
     if(NOT EXISTS "${PORT_PGO_PROFILE}")
         message(FATAL_ERROR "PORT_PGO=USE needs PORT_PGO_PROFILE=<file.profdata> (got '${PORT_PGO_PROFILE}')")
     endif()
-    add_compile_options("-fprofile-use=${PORT_PGO_PROFILE}" -Wno-profile-instr-unprofiled
-                        -Wno-profile-instr-out-of-date -Wno-profile-instr-missing -Wno-backend-plugin)
-    message(STATUS "PGO:             USE ${PORT_PGO_PROFILE}")
+    # Indexed instrumentation profiles are not forward-compatible across LLVM releases. Visual
+    # Studio can therefore provide a clang-cl older than the one that wrote a packaged profile.
+    # Probe the actual compiler during configure so that this optional optimisation can never make
+    # an otherwise supported installation fail hundreds of objects into the first build.
+    set(_pgo_probe_src "${CMAKE_BINARY_DIR}/CMakeFiles/port_pgo_probe.c")
+    set(_pgo_probe_obj "${CMAKE_BINARY_DIR}/CMakeFiles/port_pgo_probe.obj")
+    file(WRITE "${_pgo_probe_src}" "int port_pgo_probe(void) { return 0; }\n")
+    if(MSVC)
+        set(_pgo_probe_args /nologo /c "${_pgo_probe_src}" "/Fo${_pgo_probe_obj}")
+    else()
+        set(_pgo_probe_args -c "${_pgo_probe_src}" -o "${_pgo_probe_obj}")
+    endif()
+    execute_process(
+        COMMAND "${CMAKE_C_COMPILER}" ${_pgo_probe_args} "-fprofile-use=${PORT_PGO_PROFILE}"
+                -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date
+                -Wno-profile-instr-missing -Wno-backend-plugin
+        RESULT_VARIABLE _pgo_probe_result
+        OUTPUT_VARIABLE _pgo_probe_stdout
+        ERROR_VARIABLE _pgo_probe_stderr)
+    file(REMOVE "${_pgo_probe_src}" "${_pgo_probe_obj}")
+    if(_pgo_probe_result EQUAL 0)
+        add_compile_options("-fprofile-use=${PORT_PGO_PROFILE}" -Wno-profile-instr-unprofiled
+                            -Wno-profile-instr-out-of-date -Wno-profile-instr-missing -Wno-backend-plugin)
+        message(STATUS "PGO:             USE ${PORT_PGO_PROFILE}")
+    else()
+        message(WARNING "PGO profile is incompatible with ${CMAKE_C_COMPILER}; building without PGO.\n${_pgo_probe_stderr}")
+    endif()
 endif()
 
 # v190 PORT_LTO (default OFF): ThinLTO across everything -- lets the optimiser inline hot runtime paths (SPU
