@@ -257,6 +257,8 @@ struct App {
     title: String,
     title_ids: Vec<String>,
     link_name: String,
+    update_repo: Option<String>,
+    update_branch: String,
     repaint: Arc<dyn Fn() + Send + Sync>,
 
     reqs: Arc<Mutex<Reqs>>,
@@ -298,6 +300,8 @@ impl App {
             title: "inFamous".into(),
             title_ids: vec!["BCES00220".into()],
             link_name: "Infamous (Europe) (Fr,De,Es,It,Nl)".into(),
+            update_repo: None,
+            update_branch: "main".into(),
             repaint,
             reqs: Arc::new(Mutex::new(Reqs {
                 python: Check::Unknown,
@@ -326,6 +330,8 @@ impl App {
                 app.payload_bytes = info.bytes;
                 app.title = info.manifest.game_title.clone();
                 app.title_ids = info.manifest.title_ids.clone();
+                app.update_repo = info.manifest.update_repo.clone();
+                app.update_branch = info.manifest.update_branch.clone();
                 if let Some(l) = info.manifest.link_name.clone() {
                     app.link_name = l;
                 }
@@ -368,8 +374,10 @@ impl App {
         let gen = self.upd_gen;
         *self.upd.lock().unwrap() = (gen, UpdState::Checking);
         let (st, repaint) = (self.upd.clone(), self.repaint.clone());
+        let update_repo = self.update_repo.clone();
+        let update_branch = self.update_branch.clone();
         std::thread::spawn(move || {
-            let r = setup::check_update(&dir);
+            let r = setup::check_update(&dir, update_repo.as_deref(), &update_branch);
             let mut g = st.lock().unwrap();
             if g.0 == gen {
                 g.1 = UpdState::Done(r);
@@ -389,6 +397,8 @@ impl App {
             dir,
             self.title.clone(),
             self.start_menu,
+            self.update_repo.clone(),
+            self.update_branch.clone(),
             self.repaint.clone(),
         ));
         self.updating = true;

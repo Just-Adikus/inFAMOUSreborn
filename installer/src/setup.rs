@@ -663,6 +663,8 @@ impl Installer {
         location: PathBuf,
         game_title: String,
         start_menu: bool,
+        update_repo: Option<String>,
+        update_branch: String,
         repaint: Arc<dyn Fn() + Send + Sync>,
     ) -> Installer {
         let progress = Arc::new(Mutex::new(Progress {
@@ -673,7 +675,17 @@ impl Installer {
         let child = Arc::new(Mutex::new(None));
         let (p, c, ch) = (progress.clone(), cancel.clone(), child.clone());
         std::thread::spawn(move || {
-            let r = run_update(&location, &game_title, start_menu, &p, &c, &ch, &*repaint);
+            let r = run_update(
+                &location,
+                &game_title,
+                start_menu,
+                update_repo.as_deref(),
+                &update_branch,
+                &p,
+                &c,
+                &ch,
+                &*repaint,
+            );
             let mut g = p.lock().unwrap();
             if let Err(e) = &r {
                 g.push(format!("ERROR: {e}"));
@@ -718,7 +730,11 @@ pub struct UpdateInfo {
 }
 
 /// Ask the installation's own installer whether GitHub has something newer (`update --check`).
-pub fn check_update(dir: &Path) -> Result<UpdateInfo, String> {
+pub fn check_update(
+    dir: &Path,
+    update_repo: Option<&str>,
+    update_branch: &str,
+) -> Result<UpdateInfo, String> {
     let ext = if cfg!(windows) { ".exe" } else { "" };
     let cli = dir
         .join("installer")
@@ -729,6 +745,12 @@ pub fn check_update(dir: &Path) -> Result<UpdateInfo, String> {
         .arg("--root")
         .arg(dir)
         .current_dir(dir);
+    // The Setup may be repairing an installation made by a fork or an older package. Always use
+    // the update source embedded in this Setup instead of trusting that installation's manifest.
+    if let Some(repo) = update_repo {
+        cmd.arg("--repo").arg(repo);
+    }
+    cmd.arg("--branch").arg(update_branch);
     let out = hide(&mut cmd)
         .stdin(Stdio::null())
         .output()
@@ -761,6 +783,8 @@ fn run_update(
     dir: &Path,
     game_title: &str,
     start_menu: bool,
+    update_repo: Option<&str>,
+    update_branch: &str,
     p: &Arc<Mutex<Progress>>,
     cancel: &AtomicBool,
     child: &Arc<Mutex<Option<u32>>>,
@@ -794,6 +818,12 @@ fn run_update(
     set(0.01, "Checking GitHub for a new version", "");
     let mut cmd = Command::new(&cli);
     cmd.arg("update").arg("--root").arg(dir);
+    // See check_update: this deliberately migrates fork-configured and stale installations back
+    // to the repository selected by the Setup the player is currently running.
+    if let Some(repo) = update_repo {
+        cmd.arg("--repo").arg(repo);
+    }
+    cmd.arg("--branch").arg(update_branch);
     run_cli(cmd, dir, p, child, &stopped, &set, &log)?;
     if start_menu {
         add_update_shortcut(dir, game_title, &log);
