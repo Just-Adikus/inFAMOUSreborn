@@ -47,6 +47,9 @@ infamous-recomp/settings.ini
 *.ilk
 *.obj
 *.exe
+!installer/bin/
+!installer/bin/infamous-installer.exe
+!installer/bin/infamous-launch.exe
 __pycache__/
 *.pyc
 *.pre_*

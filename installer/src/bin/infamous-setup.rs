@@ -392,11 +392,15 @@ impl App {
         let Some(dir) = self.existing.clone() else {
             return;
         };
+        let Some(source) = self.source.clone() else {
+            return;
+        };
         self.location = util::path_str(&dir);
         self.installer = Some(Installer::start_update(
             dir,
             self.title.clone(),
             self.start_menu,
+            source,
             self.update_repo.clone(),
             self.update_branch.clone(),
             self.repaint.clone(),

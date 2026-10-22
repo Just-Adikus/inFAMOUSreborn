@@ -663,6 +663,7 @@ impl Installer {
         location: PathBuf,
         game_title: String,
         start_menu: bool,
+        source: Source,
         update_repo: Option<String>,
         update_branch: String,
         repaint: Arc<dyn Fn() + Send + Sync>,
@@ -679,6 +680,7 @@ impl Installer {
                 &location,
                 &game_title,
                 start_menu,
+                &source,
                 update_repo.as_deref(),
                 &update_branch,
                 &p,
@@ -783,6 +785,7 @@ fn run_update(
     dir: &Path,
     game_title: &str,
     start_menu: bool,
+    source: &Source,
     update_repo: Option<&str>,
     update_branch: &str,
     p: &Arc<Mutex<Progress>>,
@@ -805,6 +808,14 @@ fn run_update(
         repaint();
     };
     let stopped = || cancel.load(Ordering::SeqCst);
+    remove_internal_documents(dir, &log);
+    set(0.005, "Repairing the launcher and updater", "");
+    let placed = place_files(source, dir, &mut |done, total| {
+        set(0.005 + 0.01 * done as f32 / total.max(1) as f32, "", "")
+    })?;
+    if let Err(e) = crate::update::record_installed(dir, &placed) {
+        log(format!("note: could not record the repaired files: {e}"));
+    }
     let ext = if cfg!(windows) { ".exe" } else { "" };
     let cli = dir
         .join("installer")
@@ -815,7 +826,6 @@ fn run_update(
             dir.display()
         ));
     }
-    remove_internal_documents(dir, &log);
     set(0.01, "Checking GitHub for a new version", "");
     let mut cmd = Command::new(&cli);
     cmd.arg("update").arg("--root").arg(dir);

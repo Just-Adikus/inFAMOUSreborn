@@ -952,6 +952,15 @@ mod manifest_tests {
         assert_eq!(m.update_repo.as_deref(), Some("whompay/inFAMOUSreborn"));
         assert_eq!(m.update_branch, "main");
         assert_eq!(m.update_path, "");
+        for binary in [
+            "installer/bin/infamous-installer.exe",
+            "installer/bin/infamous-launch.exe",
+        ] {
+            assert!(
+                crate::util::any_match(&m.export_keep, binary),
+                "{binary} must be published for self-update"
+            );
+        }
     }
 
     #[test]

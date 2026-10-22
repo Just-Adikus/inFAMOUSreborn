@@ -828,6 +828,12 @@ fn cmd_package(s: &Session) -> Result<()> {
             );
         }
     }
+    // Keep updater-downloadable copies in the published repository. The package itself maps these
+    // binaries directly to their installed locations below, so it does not carry duplicate copies.
+    let bin_dir = s.installer_dir.join("bin");
+    std::fs::create_dir_all(&bin_dir)?;
+    std::fs::copy(&me, bin_dir.join(format!("infamous-installer{ext}")))?;
+    std::fs::copy(&launcher, bin_dir.join(format!("infamous-launch{ext}")))?;
     let mut skip = Vec::new();
     if let Some(l) = &s.m.link_name {
         skip.push(l.clone());
@@ -840,6 +846,7 @@ fn cmd_package(s: &Session) -> Result<()> {
     let files = pipeline::export_files(&s.m, &s.root, &skip)?;
     let mut list: Vec<(String, PathBuf)> = files
         .iter()
+        .filter(|f| !f.to_ascii_lowercase().starts_with("installer/bin/"))
         .map(|f| (f.clone(), util::join_slash(&s.root, f)))
         .collect();
     list.push((format!("installer/infamous-installer{ext}"), me.clone()));

@@ -305,6 +305,8 @@ exclude = [
 ]
 keep = [
   "installer/pgo/infamous.profdata",
+  # Published for self-update: mapped to installer/infamous-installer.exe and inFamous.exe.
+  "installer/bin/infamous-installer.exe", "installer/bin/infamous-launch.exe",
   # only the build files the tree needs ("**/CMakeLists.txt" also pulled in excluded folders that have one)
   "infamous-recomp/CMakeLists.txt",
   "ps3recomp/CMakeLists.txt",
