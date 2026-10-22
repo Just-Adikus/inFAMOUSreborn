@@ -224,7 +224,9 @@ configure = ["{cmake}", "-S", "{port}", "-B", "{port}/build-install", "-G", "Nin
              "-DCMAKE_BUILD_TYPE=Release",
              "-DPORT_PPU_REGCACHE=ON",
              "-DPORT_PPU_MEMLEAN=ALL",
-             "-DPORT_PGO=USE", "-DPORT_PGO_PROFILE={installer}/pgo/infamous.profdata",
+             # PGO profiles are LLVM-version-specific. Player machines use the clang-cl bundled
+             # with their Visual Studio installation, so force the portable non-PGO build here.
+             "-DPORT_PGO=OFF",
              "-DPS3RECOMP_DIR={toolkit}",
              "-DPython3_EXECUTABLE={python}"]
 compile = ["{cmake}", "--build", "{port}/build-install", "--parallel", "{build_jobs}"]

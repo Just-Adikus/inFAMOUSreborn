@@ -963,6 +963,13 @@ mod manifest_tests {
             "spu-lift must overwrite previously patched sources during --regen/update"
         );
     }
+
+    #[test]
+    fn shipped_player_build_does_not_require_version_specific_pgo() {
+        let m = shipped_manifest();
+        assert!(m.build_configure.iter().any(|arg| arg == "-DPORT_PGO=OFF"));
+        assert!(!m.build_configure.iter().any(|arg| arg == "-DPORT_PGO=USE"));
+    }
 }
 
 #[cfg(test)]
