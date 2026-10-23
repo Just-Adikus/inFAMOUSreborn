@@ -8,3 +8,4 @@ installer/generated.lock -text
 *.profdata binary
 *.png binary
 *.ico binary
+*.dll binary

@@ -144,6 +144,13 @@ if(_ps3recomp_sdl3)
 else()
     message(STATUS "  SDL3 pads:    off (no SDL3 in ${PS3RECOMP_SDL3_DIR})")
 endif()
+# Player builds pass -DPORT_REQUIRE_SDL3=ON so a missing sdl3/ folder stops the build instead of
+# silently dropping DualSense / DualShock 4 / Steam Controller support (XInput only). Dev builds: OFF.
+option(PORT_REQUIRE_SDL3 "Fail the configure when SDL3 (PlayStation / Steam controllers) is missing" OFF)
+if(WIN32 AND PORT_REQUIRE_SDL3 AND NOT _ps3recomp_sdl3)
+    message(FATAL_ERROR "SDL3 not found in ${PS3RECOMP_SDL3_DIR} (needs include/SDL3/SDL_gamepad.h): "
+        "PlayStation and Steam controllers would be disabled. Restore the sdl3/ folder or pass -DPORT_REQUIRE_SDL3=OFF.")
+endif()
 
 # HLE modules include their own headers
 target_include_directories(ps3recomp_runtime PRIVATE

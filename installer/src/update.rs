@@ -974,10 +974,13 @@ mod manifest_tests {
     }
 
     #[test]
-    fn shipped_player_build_does_not_require_version_specific_pgo() {
+    fn shipped_player_build_uses_pgo_with_shipped_profile() {
+        // PGO=USE is safe on any clang-cl: infamous-recomp/CMakeLists.txt probes the profile
+        // with the real compiler and falls back to a plain build if it can't read it.
         let m = shipped_manifest();
-        assert!(m.build_configure.iter().any(|arg| arg == "-DPORT_PGO=OFF"));
-        assert!(!m.build_configure.iter().any(|arg| arg == "-DPORT_PGO=USE"));
+        assert!(m.build_configure.iter().any(|arg| arg == "-DPORT_PGO=USE"));
+        assert!(m.build_configure.iter().any(|arg| arg.starts_with("-DPORT_PGO_PROFILE=") && arg.ends_with("pgo/infamous.profdata")));
+        assert!(crate::util::any_match(&m.export_keep, "installer/pgo/infamous.profdata"), "PGO profile must be published");
     }
 }
 

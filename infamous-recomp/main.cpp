@@ -117,6 +117,7 @@ extern volatile long g_rsx_idle_wait;
 extern "C" int  rsx_d3d12_backend_init(uint32_t w, uint32_t h, const char* title);
 extern "C" void rsx_d3d12_backend_present(void);
 extern "C" int  rsx_d3d12_backend_pump_messages(void);
+extern "C" void rsx_d3d12_heartbeat(void);   /* [HEARTBEAT] every 10 s (HEARTBEAT=0 off) */
 #  define rsx_backend_init    rsx_d3d12_backend_init
 #  define rsx_backend_present rsx_d3d12_backend_present
 #  define rsx_backend_pump    rsx_d3d12_backend_pump_messages
@@ -229,6 +230,9 @@ static DWORD WINAPI frame_clock(LPVOID)
                                     fprintf(stderr, "[rsx] FIFO idle wait cap %d ms (RSX_IDLE_MS)\n", s_idle_ms); }
                g_rsx_idle_wait = 1; g_fifo_where = 1; cellGcm_fifo_kick_wait((unsigned)s_idle_ms); g_rsx_idle_wait = 0; g_fifo_where = 0; }
         ULONGLONG now = GetTickCount64();
+#if defined(_WIN32)
+        if (rsx_ok) rsx_d3d12_heartbeat();   /* self-rate-limited to one line per 10 s */
+#endif
 
         int fired = 0;
         while ((long long)(now - next_tick) >= 0 && fired < 240) {
@@ -872,7 +876,11 @@ static void configure_stdout_buffering(void)
 #else
     const int interactive = isatty(fileno(stdout));
 #endif
-    s_stdout_immediate = interactive || (force && *force && *force != '0');
+    /* LOG_ASYNC=1: fd 1 writes into the drain pipe (v241c_la), so an unbuffered stdout costs no file I/O on the
+     * writing thread -- and nothing stays in a process buffer that a killed game (black screen -> Task Manager)
+     * would lose: the D3D12 device-removed / fence-stuck lines are exactly what a bug report needs. */
+    const char* la = getenv("LOG_ASYNC");
+    s_stdout_immediate = interactive || (force && *force && *force != '0') || (la && *la == '1');
     if (s_stdout_immediate) {
         setvbuf(stdout, NULL, _IONBF, 0);
     } else {

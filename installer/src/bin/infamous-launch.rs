@@ -177,12 +177,20 @@ impl Launch {
             .current_dir(&self.cwd)
             .envs(self.env.iter().cloned())
             .stdin(Stdio::null());
+        // The previous run's log is kept as <name>.prev.log (play.err.prev.log): a player who hits a problem
+        // usually restarts the game before sending the log, and File::create would have emptied it.
         let open = |name: &Option<String>| -> Stdio {
             match name
                 .as_deref()
                 .map(|n| resolve(&self.cwd, n))
-                .and_then(|p| std::fs::File::create(p).ok())
-            {
+                .and_then(|p| {
+                    if p.is_file() {
+                        let prev = p.with_extension("prev.log");
+                        let _ = std::fs::remove_file(&prev);
+                        let _ = std::fs::rename(&p, &prev);
+                    }
+                    std::fs::File::create(p).ok()
+                }) {
                 Some(f) => Stdio::from(f),
                 None => Stdio::null(),
             }

@@ -2205,12 +2205,12 @@ static void wait_for_gpu(void)
             if (WaitForSingleObject(s_d3d.fence_event, 2000) != WAIT_TIMEOUT)
                 return;
             HRESULT rr = s_d3d.device->lpVtbl->GetDeviceRemovedReason(s_d3d.device);
-            printf("[D3D12] wait_for_gpu STUCK %ds: want %llu got %llu removed=0x%08lX\n",
+            fprintf(stderr, "[D3D12] wait_for_gpu STUCK %ds: want %llu got %llu removed=0x%08lX\n",
                    2 * (tries + 1),
                    (unsigned long long)s_d3d.fence_values[fi],
                    (unsigned long long)s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence),
                    (long)rr);
-            fflush(stdout);
+            fflush(stderr);
             if (rr != 0 /* S_OK: device still alive, keep waiting a bit */)
                 break;
         }
@@ -2229,10 +2229,11 @@ static void move_to_next_frame(void)
             s_d3d.fence, s_d3d.fence_values[s_d3d.frame_index], s_d3d.fence_event);
         if (WaitForSingleObject(s_d3d.fence_event, 2000) == WAIT_TIMEOUT) {
             HRESULT rr = s_d3d.device->lpVtbl->GetDeviceRemovedReason(s_d3d.device);
-            printf("[D3D12] FENCE STUCK 2s: want %llu got %llu removed=0x%08lX\n",
+            fprintf(stderr, "[D3D12] FENCE STUCK 2s: want %llu got %llu removed=0x%08lX\n",
                    (unsigned long long)s_d3d.fence_values[s_d3d.frame_index],
                    (unsigned long long)s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence),
                    (long)rr);
+            fflush(stderr);
         }
     }
 
@@ -5037,9 +5038,10 @@ static ID3D12PipelineState* vp_get_fp_pso_impl(int vs_idx, u32 fp_addr, u32 blen
                    fp_addr, hr, (int)rtfmt, nrt, blend, cmask, cull, cube_mask, vs_idx);
         if (hr == (HRESULT)0x887A0005L) {   /* DXGI_ERROR_DEVICE_REMOVED */
             static int _dr = 0;
-            if (!_dr++) { printf("[D3D12] DEVICE REMOVED -- reason 0x%08lX (887A0006 hung, 887A0020 driver "
+            if (!_dr++) { fprintf(stderr, "[D3D12] DEVICE REMOVED -- reason 0x%08lX (887A0006 hung, 887A0020 driver "
                                "internal, 80070057 invalid call); every later PSO/draw fails\n",
                                (unsigned long)s_d3d.device->lpVtbl->GetDeviceRemovedReason(s_d3d.device));
+                          fflush(stderr);
                           d3d12_dred_report(); }
         }
         /* Write the failing pair (first 6) to pso_fail.hlsl: E_INVALIDARG that
@@ -8694,6 +8696,82 @@ static void vidmem_report(const char* why)
             (unsigned long long)(li.CurrentUsage >> 20), (unsigned long long)(li.Budget >> 20),
             (unsigned long long)(nl.CurrentUsage >> 20), (unsigned long long)(nl.Budget >> 20), 10);
 }
+
+/* Present() failure (2026-10-23): a removed/reset device used to go unnoticed -- the fences then complete at once, the
+ * game keeps running and the window stays black with nothing in play.err.log. Log it to stderr (first 8 failures,
+ * reason + video memory + DRED) and tell the player once. */
+static volatile long s_present_fail_n = 0;
+static volatile long s_present_fail_hr = 0;
+static DWORD WINAPI d3d12_device_lost_box(LPVOID hwnd)   /* own thread: the render thread must not sit in a modal loop */
+{
+    MessageBoxA(NULL,   /* no owner: a cross-thread owner would attach to the game window's input queue */
+                "The graphics driver stopped responding (GPU device removed), so the game can no longer show "
+                "a picture.\n\nPlease restart the game. Choosing a lower Resolution in the launcher helps "
+                "if this keeps happening.\n\nWhen reporting it, send play.err.log and play.out.log "
+                "from the game folder.",
+                "inFamous -- graphics device lost", MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST);
+    (void)hwnd;
+    return 0;
+}
+static void d3d12_present_failed(HRESULT ph)
+{
+    const long n = ++s_present_fail_n;
+    s_present_fail_hr = (long)ph;
+    if (n > 8) return;
+    const HRESULT rr = s_d3d.device ? s_d3d.device->lpVtbl->GetDeviceRemovedReason(s_d3d.device) : S_OK;
+    fprintf(stderr, "[D3D12] PRESENT FAILED #%ld hr=0x%08lX, device removed reason 0x%08lX (887A0005 removed, "
+                    "887A0006 hung, 887A0007 reset, 887A0020 driver internal, 8007000E out of memory)\n",
+            n, (unsigned long)ph, (unsigned long)rr);
+    vidmem_report("present failed");
+    fflush(stderr);
+    if (ph == DXGI_ERROR_DEVICE_REMOVED || ph == DXGI_ERROR_DEVICE_RESET || rr != S_OK) {
+        static int s_boxed = 0;
+        if (!s_boxed) {
+            s_boxed = 1;
+            d3d12_dred_report();
+            fflush(stdout); fflush(stderr);
+            HANDLE th = CreateThread(NULL, 0, d3d12_device_lost_box, (LPVOID)s_d3d.hwnd, 0, NULL);
+            if (th) CloseHandle(th);
+        }
+    }
+}
+
+/* [HEARTBEAT] (2026-10-23; HEARTBEAT=0 off): one stderr line every 10 s from the frame-clock thread, so a black-screen
+ * report shows whether the guest still flips, whether we still Present, whether the device is alive and how video
+ * memory stands. Only counters that already exist; GetDeviceRemovedReason / QueryVideoMemoryInfo are cheap. */
+void rsx_d3d12_heartbeat(void)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("HEARTBEAT"); on = (e && *e == '0') ? 0 : 1; }
+    if (!on || !s_d3d.device) return;
+    static ULONGLONG t0 = 0, last = 0;
+    static unsigned flips0 = 0; static long long pres0 = 0; static u32 rf0 = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (!t0) { t0 = last = now; return; }
+    if (now - last < 10000) return;
+    last = now;
+    extern unsigned cellGcm_flip_request_count(void);
+    extern volatile long long g_fr_presents;
+    const unsigned fl = cellGcm_flip_request_count();
+    const long long pr = g_fr_presents;
+    const u32 rf = s_fs_rf_calls;
+    const ULONGLONG lp = s_fs_pres_tick;
+    const HRESULT rr = s_d3d.device->lpVtbl->GetDeviceRemovedReason(s_d3d.device);
+    unsigned long long vu = 0, vb = 0;
+    if (s_adapter3) {
+        DXGI_QUERY_VIDEO_MEMORY_INFO li; memset(&li, 0, sizeof li);
+        if (SUCCEEDED(s_adapter3->lpVtbl->QueryVideoMemoryInfo(s_adapter3, 0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &li))) {
+            vu = li.CurrentUsage >> 20; vb = li.Budget >> 20; }
+    }
+    char lps[32];
+    if (lp) snprintf(lps, sizeof lps, "%llu ms ago", (unsigned long long)(now - lp)); else snprintf(lps, sizeof lps, "never");
+    fprintf(stderr, "[HEARTBEAT] t=%.0fs flips %u (+%u) presents %lld (+%lld) frames +%u | last present %s, last frame %u draws"
+                    " | device 0x%08lX, present failures %ld (last 0x%08lX) | vram %llu/%llu MB\n",
+            (double)(now - t0) / 1000.0, fl, fl - flips0, pr, pr - pres0, (unsigned)(rf - rf0), lps, (unsigned)s_dbg_last_draws,
+            (unsigned long)rr, (long)s_present_fail_n, (unsigned long)s_present_fail_hr, vu, vb);
+    fflush(stderr);
+    flips0 = fl; pres0 = pr; rf0 = rf;
+}
 /* ---- v225A hitch / drop telemetry --------------------------------------------------------------------
  * [FRAMEPCT] every 300 world frames (the [FRAME78] windows): the real frame-time distribution -- p50 / p99, 1% low
  * (1000 / mean of the slowest 1% of frames), 0.1% low (slowest frame), counts > 20 / 25 / 33 ms, worst -- and which
@@ -11393,7 +11471,9 @@ skip_dump_consider: ;
     /* Present */
     rft_mark(RFT_TAIL2);
     if (s_rf_present)
-        { const UINT si = present_sync_interval(); s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, si, (si == 0 && s_tearing_ok) ? DXGI_PRESENT_ALLOW_TEARING : 0); } /* v209 tearing; v30e: PRESENT_VSYNC (default 0) */   /* skipped for an offscreen-only batch */
+        { const UINT si = present_sync_interval();
+          const HRESULT ph = s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, si, (si == 0 && s_tearing_ok) ? DXGI_PRESENT_ALLOW_TEARING : 0); /* v209 tearing; v30e: PRESENT_VSYNC (default 0) */   /* skipped for an offscreen-only batch */
+          if (FAILED(ph)) d3d12_present_failed(ph); }
     rft_mark(RFT_PRESENT);
 
     move_to_next_frame();
