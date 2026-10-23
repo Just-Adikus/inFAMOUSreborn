@@ -1,5 +1,9 @@
 # inFamous PC
 
+> **Official repo: [github.com/whompay/inFAMOUSreborn](https://github.com/whompay/inFAMOUSreborn).**
+> Only download the Setup from the [Releases page](https://github.com/whompay/inFAMOUSreborn/releases) here.
+> Forks are not supported, and bugs from forks won't be fixed.
+
 An unofficial native Windows port of **inFamous** (PlayStation 3, 2009, European
 release `BCES00220`). The game's PowerPC (PPU) and SPU code is statically
 recompiled to x86-64 C/C++ with [ps3recomp](https://github.com/sp00nznet/ps3recomp),
