@@ -510,6 +510,7 @@ volatile int g_set_vsync = -1;       /* -1 env, 0/1 -- rsx_d3d12_backend.c prese
 extern volatile int g_win_fullscreen;   /* rsx_d3d12_backend.c window proc (F11) */
 extern volatile int g_fs_cutscene_open; /* runtime/ppu/ppu_fs.cpp: story-cutscene movies open right now */
 int (*volatile g_uiov_paused_fn)(void) = 0;
+volatile unsigned long long g_pause_menu_built_ms = 0;   /* infamous-recomp/stubs.cpp: last time the pause menu was built */
 /* v195: set by the native pause-menu entries (stubs.cpp, script natives on the PPU thread): 1 = Settings, 2 = Quit Game */
 volatile int g_uiov_request = 0;
 /* v243K: val/name 8 -> 12 (Language has 12 choices) */
@@ -647,7 +648,13 @@ static int menu_tick(HWND hwnd, unsigned bbw, unsigned bbh)
         static int hint_env = -1;
         if (hint_env < 0) { const char* e = getenv("UI_PAUSE_HINT"); hint_env = e && *e == '1'; }
         s_hint_on = hint_env && paused && !D.active;
-        s_wm_on = paused && !D.active && !g_fs_cutscene_open;   /* v238 pause-screen watermark; not in cutscenes */
+        /* v238 pause-screen watermark, only on the real pause menu. "paused" (world clock stopped) is also true
+         * in cutscenes, so it is shown only if the pause menu was built shortly before or during this pause. */
+        { static int was_paused; static ULONGLONG t_pause;
+          if (paused && !was_paused) t_pause = now;
+          was_paused = paused;
+          const ULONGLONG built = g_pause_menu_built_ms;
+          s_wm_on = paused && built && built + 2000 >= t_pause && !D.active && !g_fs_cutscene_open; }
         if (s_hint_on) {
             unsigned in = read_input(hwnd);   /* only polled while paused (XInput on empty slots is slow) */
             if ((in & IN_SELECT) && !sel_was) open = 1;

@@ -155,6 +155,7 @@ static int infamous_paused_probe(void)
  * =========================================================================*/
 extern "C" void ppu_register_function(uint64_t addr, void (*fn)(ppu_context*));
 extern "C" volatile int g_uiov_request;   /* rsx_ui_overlay.c */
+extern "C" volatile unsigned long long g_pause_menu_built_ms;   /* rsx_ui_overlay.c: pause watermark */
 struct inf_mbi { void* base; void* abase; unsigned long aprot; unsigned short part; size_t size; unsigned long state, prot, type; };
 extern "C" __declspec(dllimport) size_t __stdcall VirtualQuery(const void*, inf_mbi*, size_t);
 
@@ -166,6 +167,7 @@ static void pm_native_settings(ppu_context* ctx) { g_uiov_request = 1; std::fpri
 static void pm_native_quit(ppu_context* ctx)     { g_uiov_request = 2; std::fprintf(stderr, "[pausemenu] Quit Game\n"); ctx->gpr[3] = 0; }
 static void pm_native_trim(ppu_context* ctx)
 {
+    g_pause_menu_built_ms = GetTickCount64();   /* the pause menu is being built: it is open now */
     const uint32_t args = (uint32_t)ctx->gpr[4];
     const uint32_t h = args ? vm_read32(args) : 0;
     ctx->gpr[3] = 0;
