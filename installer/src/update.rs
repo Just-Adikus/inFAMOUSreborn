@@ -979,8 +979,15 @@ mod manifest_tests {
         // with the real compiler and falls back to a plain build if it can't read it.
         let m = shipped_manifest();
         assert!(m.build_configure.iter().any(|arg| arg == "-DPORT_PGO=USE"));
-        assert!(m.build_configure.iter().any(|arg| arg.starts_with("-DPORT_PGO_PROFILE=") && arg.ends_with("pgo/infamous.profdata")));
-        assert!(crate::util::any_match(&m.export_keep, "installer/pgo/infamous.profdata"), "PGO profile must be published");
+        assert!(m
+            .build_configure
+            .iter()
+            .any(|arg| arg.starts_with("-DPORT_PGO_PROFILE=")
+                && arg.ends_with("pgo/infamous.profdata")));
+        assert!(
+            crate::util::any_match(&m.export_keep, "installer/pgo/infamous.profdata"),
+            "PGO profile must be published"
+        );
     }
 }
 

@@ -228,6 +228,7 @@ configure = ["{cmake}", "-S", "{port}", "-B", "{port}/build-install", "-G", "Nin
              # compiler with it at configure time and builds without PGO if it cannot read the profile.
              "-DPORT_PGO=USE", "-DPORT_PGO_PROFILE={installer}/pgo/infamous.profdata",
              "-DPORT_REQUIRE_SDL3=ON",
+             "-DPORT_SCRUB_PRIVATE=ON",
              "-DPS3RECOMP_DIR={toolkit}",
              "-DPython3_EXECUTABLE={python}"]
 compile = ["{cmake}", "--build", "{port}/build-install", "--parallel", "{build_jobs}"]
@@ -296,6 +297,7 @@ exclude = [
   "**/*HANDOFF*", "**/*handoff*", "**/*AGENT*", "**/*agent*",
   "**/*COORD*", "**/*coord*", "**/*THREAD_PERF*", "**/*thread_perf*",
   "INFAMOUS_*.md", "PS3_PORTING_PLAYBOOK.md",
+  "**/REVIEW_*", "**/review_*", "**/*PROVENANCE*", "**/*provenance*", "**/_xfer*/",
   "infamous-recomp/tools/bench/", "ps3recomp/scratch/",
   "START_BENCH_RUNNER.cmd", "publish-github.cmd", "repackage-setup.cmd",
   # working folders, test saves, personal settings and one-off scripts in the port folder
@@ -324,7 +326,9 @@ forbid = [
   "**/*skate*", "**/*skate*/**",
   "**/*HANDOFF*", "**/*handoff*", "**/*AGENT*", "**/*agent*",
   "**/*COORD*", "**/*coord*", "**/*THREAD_PERF*", "**/*thread_perf*",
-  "INFAMOUS_*.md", "_audit_*/**",
+  "INFAMOUS_*.md", "PS3_PORTING_PLAYBOOK.md", "_audit_*/**",
+  "**/REVIEW_*", "**/review_*", "**/*PROVENANCE*", "**/*provenance*", "**/_xfer*/**",
+  "_to_delete/**", "**/tools/bench/**", "ps3recomp/scratch/**",
   "**/gamedata*/**", "**/savedata*/**", "**/dev_hdd0/**",
 ]
 
