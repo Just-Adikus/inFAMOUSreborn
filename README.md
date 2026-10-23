@@ -74,6 +74,56 @@ Max Health x2/x5/x10, Add XP, Karma +/-, Kill Enemies / Civilians, Super Speed
 and Player Model (play as Zeke, Trish, Kessler, Alden or John). Set `TRAINER=0`
 to turn it off.
 
+## DLSS and FSR (optional)
+
+The game can use NVIDIA DLSS / DLAA or AMD FSR for upscaling, and AMD FSR frame generation.
+They are not included in the download because NVIDIA and AMD distribute their SDKs themselves,
+but both are free and take a few minutes to add.
+
+- **DLSS** needs an NVIDIA RTX graphics card.
+- **FSR** works on any modern GPU (NVIDIA, AMD or Intel). FSR 4 needs a Radeon RX 9000 card;
+  other cards get FSR 3.1 automatically.
+
+**1. Download the SDK(s) you want** (green **Code** button, then **Download ZIP**):
+
+| For | Download | Rename the extracted folder to |
+|---|---|---|
+| DLSS / DLAA | [github.com/NVIDIA/DLSS](https://github.com/NVIDIA/DLSS) | `dlss-sdk` |
+| FSR and frame generation | [github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) | `fsr-sdk` |
+
+**2. Put the folder(s) in your inFamous install folder**, next to `infamous-recomp` and
+`ps3recomp`:
+
+```
+inFamous\
+  dlss-sdk\        <- contains include\ and lib\
+  fsr-sdk\         <- contains Kits\
+  infamous-recomp\
+  ps3recomp\
+  ...
+```
+
+Make sure you don't end up with a folder inside a folder (`dlss-sdk\DLSS-main\include`).
+`include` (DLSS) or `Kits` (FSR) must be directly inside.
+
+**3. Rebuild the game once.** Open a Command Prompt in the install folder and run:
+
+```bat
+type nul > .installer\update.pending
+"Update inFamous.cmd"
+```
+
+This rebuilds the game with the SDK(s), which takes a while. Any later update also picks them up
+automatically, so you only do this once.
+
+**4. Turn it on in game:** pause, then **Settings**, then **Upscaling** (DLAA, DLSS Quality /
+Balanced / Performance, FSR Native AA / Quality / Balanced / Performance) and **Frame
+Generation**. The same options are in the launcher's options window. Upscaling and frame
+generation apply after a restart.
+
+If the **Upscaling** row is missing, the build didn't find the SDK: check the folder names and
+layout from step 2, then repeat step 3.
+
 ## How it works
 
 | Path | Contents |
