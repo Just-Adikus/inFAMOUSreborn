@@ -84,7 +84,9 @@ but both are free and take a few minutes to add.
 - **FSR** works on any modern GPU (NVIDIA, AMD or Intel). FSR 4 needs a Radeon RX 9000 card;
   other cards get FSR 3.1 automatically.
 
-**1. Download the SDK(s) you want** (green **Code** button, then **Download ZIP**):
+**1. Download the SDK(s) you want.** You need the **source code**, not a Windows or Linux demo.
+On the page, click the green **Code** button, then **Download ZIP**. If you go through the
+Releases page instead, pick **Source code (zip)**, not the files with "demo" or "samples" in the name.
 
 | For | Download | Rename the extracted folder to |
 |---|---|---|
