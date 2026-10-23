@@ -90,3 +90,4 @@ to turn it off.
   contributors (see [ps3recomp/CONTRIBUTORS.md](ps3recomp/CONTRIBUTORS.md)).
 - [RPCS3](https://rpcs3.net), used to decrypt the game executable.
 - Sucker Punch Productions, for the game.
+- [Lorenzo Aiello](https://github.com/aiellolorenzo23) and [ibrahimpuri](https://github.com/ibrahimpuri), for their support.

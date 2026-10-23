@@ -6,16 +6,15 @@ project(inFamousRecomp
 )
 
 # ---------------------------------------------------------------------------
-# PORT_SCRUB_PRIVATE (player installs only, set by installer/infamous.toml): older setups shipped
-# maintainer notes and backup folders. Every player build deletes any that are still on disk.
-# Never runs in a maintainer tree (one with .git or github/ at the root, or without .installer/).
+# PORT_SCRUB_PRIVATE (player installs only, set by installer/infamous.toml): removes obsolete files
+# left behind by older setups. Never runs in a source tree (.git or github/ at the root, or no .installer/).
 # ---------------------------------------------------------------------------
-option(PORT_SCRUB_PRIVATE "Delete maintainer notes left in a player install by older setups" OFF)
+option(PORT_SCRUB_PRIVATE "Remove obsolete files left by older setups" OFF)
 get_filename_component(_scrub_root "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 if(PORT_SCRUB_PRIVATE AND EXISTS "${_scrub_root}/.installer"
    AND NOT EXISTS "${_scrub_root}/.git" AND NOT EXISTS "${_scrub_root}/github")
     set(_scrub_removed 0)
-    # Backup / transfer / audit folders.
+    # Obsolete folders.
     file(GLOB _scrub_dirs LIST_DIRECTORIES true
          "${_scrub_root}/_xfer*" "${_scrub_root}/_audit_*" "${_scrub_root}/_to_delete"
          "${_scrub_root}/infamous-recomp/_xfer*" "${_scrub_root}/infamous-recomp/_bench"
@@ -27,7 +26,7 @@ if(PORT_SCRUB_PRIVATE AND EXISTS "${_scrub_root}/.installer"
             math(EXPR _scrub_removed "${_scrub_removed} + 1")
         endif()
     endforeach()
-    # Note files by name (documents only: never code, game data, saves or build output).
+    # Obsolete documents (never code, game data, saves or build output).
     file(GLOB_RECURSE _scrub_docs
          "${_scrub_root}/*.md" "${_scrub_root}/*.txt" "${_scrub_root}/*.rst"
          "${_scrub_root}/*.docx" "${_scrub_root}/*.pdf" "${_scrub_root}/*.html")
@@ -45,7 +44,7 @@ if(PORT_SCRUB_PRIVATE AND EXISTS "${_scrub_root}/.installer"
         endif()
     endforeach()
     if(_scrub_removed GREATER 0)
-        message(STATUS "Removed ${_scrub_removed} leftover maintainer file(s)/folder(s) from older setups")
+        message(STATUS "Removed ${_scrub_removed} obsolete file(s) from older setups")
     endif()
 endif()
 
