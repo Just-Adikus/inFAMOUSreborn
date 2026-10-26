@@ -5534,15 +5534,17 @@ extern volatile int g_input_kbm;   /* cellPad.c: 1 keyboard/mouse, 0 controller,
 static int s_kg_state = 0, s_kg_cfg = -1;
 /* v197: a table -- the prompt-font atlas (kbm_icons.bin, v193) + the HUD button-prompt textures
  * (kbm_prompts.bin: "IFKBMIC2", u32 n, n x {w, h, fmt, nb, csum, orig L0, KBM L0}; tools/make_kbm_prompts.py) */
-typedef struct { u32 w, h, fmt, nb, csum; u8 *orig, *kbm; } KgEnt;
+typedef struct { u32 w, h, fmt, nb, csum; int alt; u8 *orig, *kbm; } KgEnt;   /* RU-patch: alt = mouse-aim variant (fmt bit 0x100 in the file) */
 #define KG_MAX 32
 static KgEnt s_kg[KG_MAX]; static int s_kg_n = 0;
 #define KG_CSUM_KBM 0x4B424D31u
+#define KG_CSUM_AIM 0x41494D31u   /* RU-patch: a mouse-aim variant is yet another image */
+extern volatile int g_pad_mouse_aim;   /* RU-patch: cellPad.c, the mouse drives the left stick (struggle QTEs) */
 static int kg_add(FILE* f, const u32 h[5])
 {
     if (s_kg_n >= KG_MAX || !h[3] || h[3] > (4u << 20)) return 0;
     KgEnt* e = &s_kg[s_kg_n];
-    e->w = h[0]; e->h = h[1]; e->fmt = h[2]; e->nb = h[3]; e->csum = h[4];
+    e->w = h[0]; e->h = h[1]; e->fmt = h[2] & 0xFFu; e->alt = (int)((h[2] >> 8) & 1u); e->nb = h[3]; e->csum = h[4];
     e->orig = (u8*)malloc(e->nb); e->kbm = (u8*)malloc(e->nb);
     if (!e->orig || !e->kbm || fread(e->orig, 1, e->nb, f) != e->nb || fread(e->kbm, 1, e->nb, f) != e->nb) {
         free(e->orig); free(e->kbm); return 0; }
@@ -5592,9 +5594,13 @@ static inline int kg_want_kbm(void)
 static inline int kg_hit(u32 w, u32 h, u32 basef, int cube, u32 cs)
 {
     if (cube || basef != 0x88u || (w != 512u && w != 32u) || !kg_ready()) return 0;
+    const int aim = g_pad_mouse_aim; int base = 0;
     for (int i = 0; i < s_kg_n; i++)
-        if (s_kg[i].w == w && s_kg[i].h == h && s_kg[i].fmt == basef && s_kg[i].csum == cs) return i + 1;
-    return 0;
+        if (s_kg[i].w == w && s_kg[i].h == h && s_kg[i].fmt == basef && s_kg[i].csum == cs) {
+            if (s_kg[i].alt) { if (aim) return i + 1; }   /* RU-patch: mouse-aim variant wins while that mode is on */
+            else if (!base) base = i + 1;
+        }
+    return base;
 }
 /* ---- v228 TEXCS: the frame's texture checksums in parallel at the top of the prepass --------------------------
  * Every cached texture bound in a frame is re-validated once per frame (tex_csum_faces / tex_csum_dense below:
@@ -5995,7 +6001,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
             if (!tcs_take(i, c->off, nb, face_stride, basef == 0x81, &cs))   /* v228 TEXCS: precomputed this frame? */
                 cs = (basef == 0x81) ? tex_csum_dense(vm_base + c->off, nb)
                                      : tex_csum_faces(vm_base + c->off, nb, face_stride);
-            if (_kg_k && kg_hit(w, h, basef, cube, cs)) cs ^= KG_CSUM_KBM;   /* v193: KBM icons are a different image */
+            if (_kg_k) { const int _kh = kg_hit(w, h, basef, cube, cs); if (_kh) cs ^= s_kg[_kh - 1].alt ? KG_CSUM_AIM : KG_CSUM_KBM; }   /* v193: KBM icons are a different image */
             if (cs == c->csum) { c->used = 1; c->lru = s_tex_frame; tex_assoc_note(hh, i, assoc); return i; }
             slot = i; break;                      /* stale: fall through and redo */
         }
@@ -6696,7 +6702,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
     { u32 nb = dxt ? (blkrow * blkrows) : (w * h * bpp);
       t->csum = ((fmt & 0x9F) == 0x81) ? tex_csum_dense(vm_base + off, nb)
                                        : tex_csum_faces(vm_base + off, nb, face_stride);
-      if (_kg_k && kg_hit(w, h, basef, cube, t->csum)) t->csum ^= KG_CSUM_KBM; }   /* v193: same rule as the bind check */
+      if (_kg_k) { const int _kh = kg_hit(w, h, basef, cube, t->csum); if (_kh) t->csum ^= s_kg[_kh - 1].alt ? KG_CSUM_AIM : KG_CSUM_KBM; } }   /* v193: same rule as the bind check */
     #undef TEX_CSUM
     return slot;
 }

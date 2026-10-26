@@ -162,6 +162,18 @@ static int overlay_wanted(void)
     return !(e && (e[0] == 'b' || e[0] == 'B'));     /* MSGDIALOG_NATIVE=box -> MessageBox */
 }
 
+#ifdef _WIN32
+/* Game text (save titles, dialog messages) is UTF-8; MessageBoxA would show it in the ANSI code page
+ * (Cyrillic turns into "Р'Рѕ..."). Convert to UTF-16 and use MessageBoxW. */
+static int msgbox_utf8(HWND w, const char* text, const char* caption, UINT flags)
+{
+    static wchar_t wt[4096], wc[256];
+    if (!MultiByteToWideChar(CP_UTF8, 0, text, -1, wt, 4096) ||
+        !MultiByteToWideChar(CP_UTF8, 0, caption, -1, wc, 256))
+        return MessageBoxA(w, text, caption, flags);
+    return MessageBoxW(w, wt, wc, flags);
+}
+#endif
 /* Return a PS3 button value, or BUTTON_NONE when native UI is disabled. */
 static s32 show_native_dialog(CellMsgDialogType type, const char* message)
 {
@@ -171,11 +183,11 @@ static s32 show_native_dialog(CellMsgDialogType type, const char* message)
     UINT flags = MB_TASKMODAL | MB_SETFOREGROUND | MB_TOPMOST;
     if (button_type == CELL_MSGDIALOG_TYPE_BUTTON_TYPE_YESNO) {
         flags |= MB_YESNO | MB_ICONQUESTION;
-        return MessageBoxA(GetForegroundWindow(), message, "inFamous", flags) == IDYES
+        return msgbox_utf8(GetForegroundWindow(), message, "inFamous", flags) == IDYES
              ? CELL_MSGDIALOG_BUTTON_YES : CELL_MSGDIALOG_BUTTON_NO;
     }
     if (button_type == CELL_MSGDIALOG_TYPE_BUTTON_TYPE_OK) {
-        MessageBoxA(GetForegroundWindow(), message, "inFamous", flags | MB_OK | MB_ICONINFORMATION);
+        msgbox_utf8(GetForegroundWindow(), message, "inFamous", flags | MB_OK | MB_ICONINFORMATION);
         return CELL_MSGDIALOG_BUTTON_OK;
     }
 #else

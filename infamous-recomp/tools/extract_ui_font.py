@@ -72,6 +72,25 @@ def dxt5(off, W, H):
     return out[::-1]
 
 TXT_TEX, ICO_TEX = 120626, 120625     # font_main_latin_00.dds, font_icons_00.dds (oid = manifest line - 1)
+
+def find_text_font_oid():
+    """The main text font's texture oid differs per language (russian: 136564). Scan every font record and
+    take the one with the 100-unit line height and the most glyphs."""
+    best = None
+    for k in range(4, len(d) - 20):
+        scale = struct.unpack('>f', d[k+4:k+8])[0]
+        if not 0.001 < scale < 1: continue
+        line, z, tab, n = struct.unpack('>HHII', d[k+8:k+20])
+        if line != 100 or z != 0 or not 0 < n < 2000 or tab + B + 20 * n > len(d): continue
+        g = [struct.unpack('>HHHHHhhHHH', d[tab+B+20*i: tab+B+20*i+20]) for i in range(n)]
+        if not all(e[3] < 1100 and e[4] < 600 for e in g): continue
+        oid = struct.unpack('>I', d[k:k+4])[0]
+        if 0 < oid < 10**7 and (best is None or n > best[1]): best = (oid, n)
+    if best is None: raise SystemExit('no text font found in lang_%s.xpp' % lang)
+    return best[0]
+
+if d.find(struct.pack('>I', TXT_TEX)) < 0 or lang != 'english':
+    TXT_TEX = find_text_font_oid()
 tl, tg = find_font(TXT_TEX); il, ig = find_font(ICO_TEX)
 tw, th, toff, tfmt = find_tex(TXT_TEX); iw, ih, ioff, ifmt = find_tex(ICO_TEX)
 print('text font: %d glyphs line %d, atlas %dx%d fmt 0x%02X @0x%X' % (len(tg), tl, tw, th, tfmt, toff))
@@ -84,6 +103,39 @@ cov = txt[..., 3] if txt[..., 3].mean() > txt[..., 0].mean() else txt[..., 0]
 atlas[:th, :tw, :3] = 255; atlas[:th, :tw, 3] = cov
 atlas[512:512+ih, :iw] = dxt5(ioff, iw, ih)
 atlas[1008:1016, 1008:1016] = 255
+
+# Other languages' text fonts carry only the Latin letters their own text uses (russian lacks M, O, U, ...).
+# Borrow every glyph the English font has and this one lacks, packed into the free bottom-right quarter.
+if lang != 'english':
+    own = set(e[0] for e in tg)
+    d_lang = d
+    d = p.read(p.names.index('/lang_english.xpp'))
+    _, eg = find_font(120626)
+    ew, eh, eoff, _ = find_tex(120626)
+    etxt = unswizzle_argb(eoff, ew, eh)
+    ecov = etxt[..., 3] if etxt[..., 3].mean() > etxt[..., 0].mean() else etxt[..., 0]
+    d = d_lang
+    px, py, row = 512, 512, 0
+    added = 0
+    tg = list(tg)
+    for (c, x, y, w, h, xo, yo, adv, z, pg) in eg:
+        if c in own or w == 0 or h == 0: continue
+        if px + w > 1024: px, py, row = 512, py + row + 1, 0
+        if py + h > 1006: print('(no room for more borrowed glyphs)'); break
+        atlas[py:py+h, px:px+w, :3] = 255
+        atlas[py:py+h, px:px+w, 3] = ecov[y:y+h, x:x+w]
+        tg.append((c, px, py, w, h, xo, yo, adv, 0, 0))
+        px += w + 1; row = max(row, h); added += 1
+    print('borrowed %d glyphs from the English font' % added)
+# Neither font has '<' (the settings menu's left arrow): mirror '>' into the free corner.
+if not any(e[0] == 0x3C for e in tg):
+    gt = [e for e in tg if e[0] == 0x3E]
+    if gt:
+        (c, x, y, w, h, xo, yo, adv, z, pg) = gt[0]
+        nx, ny = 1008 - w - 2, 1006 - h
+        atlas[ny:ny+h, nx:nx+w] = atlas[y:y+h, x:x+w][:, ::-1]
+        tg = list(tg) + [(0x3C, nx, ny, w, h, adv - xo - w if adv > xo + w else xo, yo, adv, 0, 0)]
+        print("added '<' (mirrored '>')")
 recs = b''.join(struct.pack('<Ihhhhhhhh', c, x, y, w, h, xo, yo, adv, 0) for (c, x, y, w, h, xo, yo, adv, z, pg) in tg)
 recs += b''.join(struct.pack('<Ihhhhhhhh', c, x, y + 512, w, h, xo, yo, adv, 0) for (c, x, y, w, h, xo, yo, adv, z, pg) in ig)
 out = os.path.join(ROOT, 'assets', 'ui_font.bin')

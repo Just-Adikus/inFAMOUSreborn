@@ -296,7 +296,7 @@ impl App {
             payload_bytes: 0,
             load_error: None,
             title: "inFamous".into(),
-            title_ids: vec!["BCES00220".into()],
+            title_ids: vec!["BCES00609".into(), "BCES00220".into()],
             link_name: "Infamous (Europe) (Fr,De,Es,It,Nl)".into(),
             update_repo: None,
             update_branch: "main".into(),

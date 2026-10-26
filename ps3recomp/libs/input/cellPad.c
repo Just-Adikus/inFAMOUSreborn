@@ -234,6 +234,13 @@ static int pad_mouse_direct(void)
 static volatile LONG s_rs_reads = 0, s_rs_n73 = 0, s_rs_n85 = 0;
 static volatile LONG s_rs_kind[8];
 static volatile int s_kbm_lstick_keys = 0;      /* WASD is moving the left stick this poll (pad_poll_kbm) */
+/* RU-patch: PAD_MOUSE_LSTICK_ABS (default 1): while the mouse drives the left stick (struggle QTEs such as Sasha's
+ * "aim at the target, press X repeatedly"), the mouse MOVES a virtual stick that stays where it was left (like
+ * holding a real stick) instead of feeding mouse velocity that snaps back to centre; PAD_MOUSE_LSTICK_RANGE (300)
+ * = mouse pixels from centre to full deflection. The mode no longer ends after 2 s without mouse motion.
+ * PAD_MOUSE_LSTICK_LMB (default 1): left click also presses Cross while the mode is on. */
+static volatile int s_mls_active = 0;
+volatile int g_pad_mouse_aim = 0;   /* RU-patch: read by the renderer (mouse-aim prompt textures) */
 void ps3_pad_rstick_read(u32 site, u32 which, u32 kind)
 {
     if (!which) return;
@@ -252,8 +259,11 @@ static void pad_mouse_lstick(u32 ctrl, long dx, long dy, double dt, int captured
     if (!on) return;
     static LONG s_judge = -1;          /* s_rs_reads right after the last clear mouse frame, -1 = nothing to judge */
     static int s_unread = 0, s_active = 0, s_nlog = 0;
-    static float s_lx = 0.0f, s_ly = 0.0f;
+    static float s_lx = 0.0f, s_ly = 0.0f, s_ax = 0.0f, s_ay = 0.0f;
     static unsigned long long s_last_move = 0;
+    static int absm = -1; static float range = 300.0f;
+    if (absm < 0) { absm = pad_envi("PAD_MOUSE_LSTICK_ABS", 1);
+                    const char* r = getenv("PAD_MOUSE_LSTICK_RANGE"); if (r && *r) range = (float)atof(r); if (range < 20.0f) range = 20.0f; }
     extern int (*volatile g_uiov_paused_fn)(void);
     const unsigned long long now = GetTickCount64();
     const int paused = g_uiov_paused_fn ? g_uiov_paused_fn() : 0;
@@ -265,26 +275,34 @@ static void pad_mouse_lstick(u32 ctrl, long dx, long dy, double dt, int captured
         fflush(stdout); } } while (0)
     if (s_judge >= 0 && reads != s_judge) {            /* a camera consumed the right stick since the last mouse frame */
         if (s_active) LSTICK_LOG("off (a camera reads the right stick again)");
-        s_active = 0; s_unread = 0; s_judge = -1;
+        s_active = 0; s_unread = 0; s_judge = -1; s_ax = s_ay = 0.0f;
     }
     if (paused || !captured) { if (s_active) LSTICK_LOG(paused ? "off (paused)" : "off (mouse released)");
-                               s_active = 0; s_unread = 0; s_judge = -1; s_lx = s_ly = 0.0f; return; }
+                               s_active = 0; s_unread = 0; s_judge = -1; s_lx = s_ly = 0.0f; s_ax = s_ay = 0.0f; s_mls_active = 0; g_pad_mouse_aim = 0; return; }
     float tx = 0.0f, ty = 0.0f;
     if (moved) {
         s_last_move = now;
         tx = (float)((double)dx / dt) / spd;
         ty = -(float)((double)dy / dt) / spd;           /* mouse up -> stick up (+) */
-        if (s_judge >= 0 && !s_active && ++s_unread >= need) { s_active = 1; s_lx = s_ly = 0.0f; LSTICK_LOG("ON (mouse moves, nothing reads the right stick)"); }
+        if (s_judge >= 0 && !s_active && ++s_unread >= need) { s_active = 1; s_lx = s_ly = 0.0f; s_ax = s_ay = 0.0f; LSTICK_LOG("ON (mouse moves, nothing reads the right stick)"); }
         /* judge only clear deflections (the 3rd-person camera skips its read below a small magnitude) */
         s_judge = (sqrtf(tx * tx + ty * ty) >= 0.25f) ? reads : -1;
         if (s_judge < 0 && !s_active) s_unread = 0;
-    } else if (s_active && now - s_last_move > 2000) {
+        if (s_active && absm) {                         /* RU-patch: integrate into a virtual stick position */
+            s_ax += (float)dx / range; s_ay -= (float)dy / range;
+            const float am = sqrtf(s_ax * s_ax + s_ay * s_ay); if (am > 1.0f) { s_ax /= am; s_ay /= am; }
+        }
+    } else if (s_active && !absm && now - s_last_move > 2000) {
         LSTICK_LOG("off (mouse idle 2 s)"); s_active = 0; s_unread = 0; s_judge = -1;
     }
+    s_mls_active = s_active; g_pad_mouse_aim = s_active;
     if (!s_active) return;
+    if (absm) { s_lx = s_ax * gain; s_ly = s_ay * gain; }
+    else {
     /* light smoothing so frames without a mouse packet do not drop the stick to zero */
     s_lx = s_lx * 0.35f + tx * gain * 0.65f;
     s_ly = s_ly * 0.35f + ty * gain * 0.65f;
+    }
     float m = sqrtf(s_lx * s_lx + s_ly * s_ly);
     if (m > 1.0f) { s_lx /= m; s_ly /= m; m = 1.0f; }
     if (m < 0.002f) { s_lx = s_ly = 0.0f; return; }    /* still: leave the converted stick (controller) alone */
@@ -486,6 +504,8 @@ static void pad_poll_kbm(int merge)
     if (KD('E'))        btns |= CELL_PAD_CTRL_TRIANGLE;
     if (!s_menu_free && KD(VK_RBUTTON)) btns |= CELL_PAD_CTRL_L1;
     if (!s_menu_free && !s_lmb_block && KD(VK_LBUTTON)) btns |= CELL_PAD_CTRL_R1;
+    { static int lmbx = -1; if (lmbx < 0) lmbx = pad_envi("PAD_MOUSE_LSTICK_LMB", 1);   /* RU-patch: LMB = Cross in struggle QTEs */
+      if (lmbx && s_mls_active && !s_menu_free && KD(VK_LBUTTON)) btns |= CELL_PAD_CTRL_CROSS; }
     if (KD('Q'))        btns |= CELL_PAD_CTRL_L2;
     if (KD('R'))        btns |= CELL_PAD_CTRL_R2;
     if (KD('V'))        btns |= CELL_PAD_CTRL_L3;

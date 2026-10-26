@@ -1,55 +1,96 @@
-# inFamous PC
+# inFamous PC — русская версия (BCES00609)
 
-> **Official repo: [github.com/whompay/inFAMOUSreborn](https://github.com/whompay/inFAMOUSreborn).**
-> Only download the Setup from the [Releases page](https://github.com/whompay/inFAMOUSreborn/releases) here.
-> Forks are not supported, and bugs from forks won't be fixed.
+> **Это неофициальный форк.** Автор порта — **[whompay](https://github.com/whompay)**, оригинальный
+> репозиторий: [github.com/whompay/inFAMOUSreborn](https://github.com/whompay/inFAMOUSreborn).
+> Форк поддерживает европейское издание **BCES00609** (Великобритания, Россия, Австралия, Португалия)
+> и добавляет русский язык интерфейса порта и ряд доработок (список ниже).
+> Об ошибках этой версии пишите в [Issues форка](https://github.com/Just-Adikus/inFAMOUSreborn/issues),
+> а не автору оригинала: оригинальный проект форки не поддерживает.
 
-An unofficial native Windows port of **inFamous** (PlayStation 3, 2009, European
-release `BCES00220`). The game's PowerPC (PPU) and SPU code is statically
-recompiled to x86-64 C/C++ with [ps3recomp](https://github.com/sp00nznet/ps3recomp),
-so it runs as a normal Windows program rather than under an emulator.
+Неофициальный нативный порт **inFamous** (PlayStation 3, 2009) для Windows. Код игры для процессора
+PowerPC (PPU) и сопроцессоров SPU статически рекомпилирован в x86-64 C/C++ с помощью
+[ps3recomp](https://github.com/sp00nznet/ps3recomp), поэтому игра работает как обычная программа
+Windows, а не в эмуляторе.
 
-**This repository contains no game code or data.** You build the game yourself,
-on your own PC, from your own copy of the game.
+**В репозитории нет ни кода, ни данных игры.** Игра собирается на вашем ПК из вашей собственной копии.
 
-## Easy install
+## Поддерживаемые версии игры
 
-Download **inFamous Setup.exe** from the latest release, run it, choose your
-`.iso` (an encrypted image works with its `.dkey` next to it) or your game
-folder (the one with `PS3_GAME` in it), pick an install location and press
-**Install**.
+| Издание | Код | Статус |
+|---|---|---|
+| Европа: Великобритания, Россия, Австралия, Португалия (в т. ч. Platinum, Essentials) | **BCES00609** | основная версия этого форка |
+| Европа: Франция, Германия, Испания, Италия, Нидерланды | BCES00220 | тоже работает |
 
-Setup checks for Python and the C++ build tools and offers to install them,
-copies the game out of the disc image, regenerates the recompiled code from your
-copy, builds it and adds an inFamous shortcut. Running Setup again on the same
-folder updates or repairs the install and only redoes what changed.
+У обоих изданий **один и тот же исполняемый файл** (SHA-256 расшифрованного `EBOOT.elf`:
+`095d851432f3b55179cd725b46838ffedb3e5eb9f73889e52b6f11f3d3f494fd`), поэтому порт подходит к обоим.
+Проверить свой диск можно так (после расшифровки EBOOT в RPCS3):
 
-## Updating
+```bat
+certutil -hashfile "...\PS3_GAME\USRDIR\EBOOT.elf" SHA256
+```
 
-When a new version is published here, players update in place instead of reinstalling:
-**Update now** in Setup (it finds the existing install), the **Update inFamous** shortcut in
-the Start menu, or `Update inFamous.cmd` in the install folder. The updater compares every file
-with this repository, downloads only what changed, regenerates the game code only if the
-port's patches changed, and recompiles only the affected parts. Installs made with an older
-Setup need one run of the new Setup on the same folder first.
+## Что добавлено в этом форке
 
-## Requirements
+- **Поддержка BCES00609** в установщике (оригинал принимает только BCES00220).
+- **Русский язык по умолчанию.** Игра запускается на русском (меню, субтитры, озвучка из
+  `russian.psarc`); язык меняется в настройках (**Language / Язык**).
+- **Русский интерфейс порта:** меню настроек, пункты «Настройки» и «Выйти из игры» в паузе,
+  окна сохранения и загрузки. Шрифт порта собирается из русского шрифта игры (с кириллицей),
+  латиница добирается из английского.
+- **Кириллица в системных окнах** сохранения и сообщений (в оригинале там «кракозябры»).
+- **Слоты сохранений прямо в игре.** При сохранении можно выбрать «Новый слот» вместо перезаписи
+  единственного сохранения, при загрузке — любой слот. Перед загрузкой слота текущее сохранение
+  автоматически копируется в слот «Резерв» (хранятся 5 последних). Отключить: `SAVEDATA_SLOTS=0`.
+- **Менеджер сохранений** `Сохранения inFamous.cmd`: те же слоты вне игры — переименование,
+  удаление, резервные копии.
+- **Подсказки для клавиатуры и мыши:** «ЛКМ» / «ПКМ» вместо «LMB» / «RMB»; экран «Управление»
+  показывает клавиатуру и мышь вместо геймпада.
+- **QTE с прицеливанием** (например, миссия «Обед с Сашей»): мышь двигает виртуальный левый стик
+  и держит прицел на месте, **ЛКМ** работает как «крестик», подсказки на экране меняются на мышь.
+  Настройки: `PAD_MOUSE_LSTICK_RANGE` (чувствительность, 300), `PAD_MOUSE_LSTICK_LMB=0`,
+  `PAD_MOUSE_LSTICK_ABS=0` (вернуть поведение оригинала).
+- **Для слабых ПК:** адаптивная дальность прорисовки настроена на 30 FPS (снижается до 0,8 от PS3
+  при FPS ниже 28 и возвращается выше 34). Перекрытие кадров рендера (`RF_TRIPLE`/`RF_EARLY`)
+  выключено — на части систем оно вешало вывод изображения (чёрный экран со звуком).
 
-- Your own inFamous disc dump, European release (`BCES00220`).
-- Windows 10 or 11 (64-bit) and a GPU with Direct3D 12 support.
-- A CPU with SSE4.1 (2008 or newer). On CPUs without AVX2 (Intel before 2013, Pentium/Celeron
-  without AVX, AMD before 2015) Setup builds a slower compatibility version automatically.
-  On PCs with 16 or fewer CPU threads the game uses fewer threads and less CPU (tested down to 4 threads).
-- [Python 3.10+](https://www.python.org/downloads/) with "Add python.exe to
-  PATH" ticked.
-- [Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/downloads/)
-  with the **Desktop development with C++** workload and the **C++ Clang
-  Compiler for Windows** component.
-- [RPCS3](https://rpcs3.net), only if your `PS3_GAME\USRDIR` has `EBOOT.BIN`
-  but no decrypted `EBOOT.elf`. Setup uses it to decrypt the executable.
-- About 10 GB of free disk space and 16 GB of RAM.
+## Простая установка
 
-## Building manually
+Скачайте **inFamous Setup.exe** из последнего [релиза этого форка](https://github.com/Just-Adikus/inFAMOUSreborn/releases),
+запустите, выберите образ `.iso` (зашифрованный образ работает вместе с `.dkey` рядом) или папку
+игры (ту, где лежит `PS3_GAME`), укажите папку установки и нажмите **Install**.
+
+Setup проверит Python и инструменты сборки C++ и предложит их установить, скопирует игру из образа,
+заново сгенерирует рекомпилированный код из вашей копии, соберёт его и создаст ярлык inFamous.
+Повторный запуск Setup на той же папке обновляет или чинит установку и переделывает только то,
+что изменилось.
+
+## Обновление
+
+Когда в форке выходит новая версия, установку можно обновить на месте: **Update now** в Setup
+(он найдёт существующую установку), ярлык **Update inFamous** в меню «Пуск» или
+`Update inFamous.cmd` в папке установки. Обновлятор сравнивает файлы с **этим форком**, скачивает
+только изменившиеся, перегенерирует код игры, только если изменились патчи порта, и
+перекомпилирует только затронутое. Установки, сделанные старым Setup, сначала нужно один раз
+обработать новым Setup на той же папке.
+
+> Установка из этого форка обновляется из форка, установка из оригинала — из оригинала.
+> Если запустить Setup оригинала на папке этого форка, он вернёт её к оригиналу (без русских правок).
+
+## Требования
+
+- Собственный дамп диска inFamous: **BCES00609** (или BCES00220).
+- Windows 10 или 11 (64-бит), видеокарта с поддержкой Direct3D 12.
+- Процессор с SSE4.1 (2008 г. и новее). На процессорах без AVX2 (Intel до 2013 г., Pentium/Celeron
+  без AVX, AMD до 2015 г.) Setup сам соберёт более медленную совместимую версию. На ПК с 16 и
+  меньше потоками игра использует меньше потоков и меньше нагружает процессор.
+- [Python 3.10+](https://www.python.org/downloads/) с отмеченным пунктом «Add python.exe to PATH».
+- [Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/downloads/) с нагрузкой
+  **Desktop development with C++** и компонентом **C++ Clang Compiler for Windows**.
+- [RPCS3](https://rpcs3.net) — только если в `PS3_GAME\USRDIR` есть `EBOOT.BIN`, но нет
+  расшифрованного `EBOOT.elf`. Setup использует его для расшифровки.
+- Около 10 ГБ свободного места и 16 ГБ оперативной памяти.
+
+## Сборка вручную
 
 ```bat
 cd installer
@@ -57,89 +98,96 @@ cargo build --release
 target\release\infamous-installer --game "D:\Dumps\inFamous"
 ```
 
-`infamous-installer doctor` checks the requirements only. Finished steps are
-skipped when you run it again, so an interrupted install continues where it
-stopped. See [installer/README.md](installer/README.md) for every step and the
-maintainer commands.
+Нужен [Rust](https://rustup.rs). `infamous-installer doctor` только проверяет требования. Готовые
+шаги при повторном запуске пропускаются, так что прерванная установка продолжается с того же места;
+`--regen` начинает генерацию кода заново (нужно после обновления версии порта). Все шаги и команды
+сопровождающего описаны в [installer/README.md](installer/README.md) (на английском).
 
-## Playing
+## Игра
 
-Run **inFamous** (the shortcut Setup made). It opens a small options window first
-(vsync, frame cap, resolution, language and more, saved to `settings.ini`);
-**Play** starts the game. The same settings are in the game's pause menu under
-**Settings**. Controllers work as on the console, and keyboard and mouse are supported.
+Запускайте **inFamous** (ярлык, который создал Setup). Сначала откроется небольшое окно настроек
+(вертикальная синхронизация, ограничение кадров, разрешение, язык и т. д., сохраняются в
+`settings.ini`), кнопка **Play** запускает игру. Те же настройки есть в меню паузы игры, пункт
+**Настройки**. Геймпад работает как на консоли, поддерживаются клавиатура и мышь.
 
-**F10** opens the in-game trainer: God Mode, Infinite Energy, Refill Health,
-Max Health x2/x5/x10, Add XP, Karma +/-, Kill Enemies / Civilians, Super Speed
-and Player Model (play as Zeke, Trish, Kessler, Alden or John). Set `TRAINER=0`
-to turn it off.
+**Управление с клавиатуры:** WASD — движение, Shift — бег, мышь — камера, ЛКМ — выстрел (R1),
+ПКМ — прицеливание (L1), Q — поглощение электричества (L2), R — барьер (R2), V — импульсный радар (L3),
+Пробел / C / F / E — прыжок / уклонение / ближний бой / взаимодействие, Ctrl и стрелки — крестовина,
+Esc — пауза, Tab — карта.
 
-## DLSS and FSR (optional)
+**F10** открывает встроенный трейнер: бессмертие, бесконечная энергия, восстановление здоровья,
+здоровье x2/x5/x10, опыт, карма +/-, убрать врагов / мирных, суперскорость и модель игрока
+(Зик, Триш, Кесслер, Олден, Джон). Отключить: `TRAINER=0`.
 
-The game can use NVIDIA DLSS / DLAA or AMD FSR for upscaling, and AMD FSR frame generation.
-They are not included in the download because NVIDIA and AMD distribute their SDKs themselves,
-but both are free and take a few minutes to add.
+## DLSS и FSR (по желанию)
 
-- **DLSS** needs an NVIDIA RTX graphics card.
-- **FSR** works on any modern GPU (NVIDIA, AMD or Intel). FSR 4 needs a Radeon RX 9000 card;
-  other cards get FSR 3.1 automatically.
+Игра умеет NVIDIA DLSS / DLAA или AMD FSR для масштабирования и генерацию кадров AMD FSR. Их нет в
+сборке, потому что NVIDIA и AMD распространяют свои SDK сами, но оба бесплатны и подключаются за
+несколько минут.
 
-**1. Download the SDK(s) you want.** You need the **source code**, not a Windows or Linux demo.
-On the page, click the green **Code** button, then **Download ZIP**. If you go through the
-Releases page instead, pick **Source code (zip)**, not the files with "demo" or "samples" in the name.
+- **DLSS** нужна видеокарта NVIDIA RTX.
+- **FSR** работает на любой современной видеокарте (NVIDIA, AMD, Intel). FSR 4 требует Radeon RX 9000,
+  остальные карты автоматически получают FSR 3.1.
 
-| For | Download | Rename the extracted folder to |
+> Если игра упирается в процессор (низкий FPS при слабой загрузке видеокарты), DLSS почти не поможет,
+> а **генерация кадров FSR** заметно добавит плавности ценой небольшой задержки управления.
+
+**1. Скачайте нужные SDK.** Нужен **исходный код**, а не демо: на странице нажмите зелёную кнопку
+**Code**, затем **Download ZIP** (или на странице Releases — **Source code (zip)**).
+
+| Для | Скачать | Переименуйте распакованную папку в |
 |---|---|---|
 | DLSS / DLAA | [github.com/NVIDIA/DLSS](https://github.com/NVIDIA/DLSS) | `dlss-sdk` |
-| FSR and frame generation | [github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) | `fsr-sdk` |
+| FSR и генерация кадров | [github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) | `fsr-sdk` |
 
-**2. Put the folder(s) in your inFamous install folder**, next to `infamous-recomp` and
-`ps3recomp`:
+**2. Положите папки в папку установки inFamous**, рядом с `infamous-recomp` и `ps3recomp`:
 
 ```
 inFamous\
-  dlss-sdk\        <- contains include\ and lib\
-  fsr-sdk\         <- contains Kits\
+  dlss-sdk\        <- внутри include\ и lib\
+  fsr-sdk\         <- внутри Kits\
   infamous-recomp\
   ps3recomp\
   ...
 ```
 
-Make sure you don't end up with a folder inside a folder (`dlss-sdk\DLSS-main\include`).
-`include` (DLSS) or `Kits` (FSR) must be directly inside.
+Проследите, чтобы не получилась папка в папке (`dlss-sdk\DLSS-main\include`): `include` (DLSS) или
+`Kits` (FSR) должны лежать сразу внутри.
 
-**3. Rebuild the game once.** Open a Command Prompt in the install folder and run:
+**3. Один раз пересоберите игру.** Откройте командную строку в папке установки и выполните:
 
 ```bat
 type nul > .installer\update.pending
 "Update inFamous.cmd"
 ```
 
-This rebuilds the game with the SDK(s), which takes a while. Any later update also picks them up
-automatically, so you only do this once.
+Пересборка займёт время. Последующие обновления подхватят SDK сами.
 
-**4. Turn it on in game:** pause, then **Settings**, then **Upscaling** (DLAA, DLSS Quality /
-Balanced / Performance, FSR Native AA / Quality / Balanced / Performance) and **Frame
-Generation**. The same options are in the launcher's options window. Upscaling and frame
-generation apply after a restart.
+**4. Включите в игре:** пауза → **Настройки** → **Масштабирование** (DLAA, DLSS Quality / Balanced /
+Performance, FSR Native AA / Quality / Balanced / Performance) и **Генерация кадров**. Те же
+параметры есть в окне настроек лаунчера. Применяются после перезапуска.
 
-If the **Upscaling** row is missing, the build didn't find the SDK: check the folder names and
-layout from step 2, then repeat step 3.
+Если строки **Масштабирование** нет, сборка не нашла SDK: проверьте имена и расположение папок из
+шага 2 и повторите шаг 3.
 
-## How it works
+## Как это устроено
 
-| Path | Contents |
+| Путь | Что внутри |
 |---|---|
-| `ps3recomp` | The recompiler toolkit and runtime: PPU and SPU lifters, HLE system libraries, RSX on Direct3D 12, audio and input |
-| `infamous-recomp` | The inFamous-specific parts: program entry, game stubs and fixes, asset tools |
-| `installer` | Setup and the command-line installer: reads the disc, regenerates the code from your game, applies `installer/patches`, builds |
-| `installer/infamous.toml` | Everything about the game and the port: pipeline steps, generated files, build and launch settings |
-| `installer/generated.lock` | Hashes of each generated file before and after the port's patches |
+| `ps3recomp` | Набор инструментов рекомпиляции и рантайм: лифтеры PPU и SPU, HLE системных библиотек, RSX на Direct3D 12, звук и ввод |
+| `infamous-recomp` | Части, специфичные для inFamous: точка входа, заглушки и исправления игры, инструменты для ресурсов |
+| `installer` | Setup и консольный установщик: читает диск, генерирует код из вашей игры, применяет `installer/patches`, собирает |
+| `installer/infamous.toml` | Всё об игре и порте: шаги генерации, генерируемые файлы, настройки сборки и запуска |
+| `installer/generated.lock` | Хэши каждого генерируемого файла до и после патчей порта |
 
-## Credits
+## Авторы
 
-- [ps3recomp](https://github.com/sp00nznet/ps3recomp) by sp00nznet and
-  contributors (see [ps3recomp/CONTRIBUTORS.md](ps3recomp/CONTRIBUTORS.md)).
-- [RPCS3](https://rpcs3.net), used to decrypt the game executable.
-- Sucker Punch Productions, for the game.
-- [Lorenzo Aiello](https://github.com/aiellolorenzo23) and [ibrahimpuri](https://github.com/ibrahimpuri), for their support.
+- **[whompay](https://github.com/whompay)** — автор порта inFamous PC
+  ([оригинальный репозиторий](https://github.com/whompay/inFAMOUSreborn)).
+- [ps3recomp](https://github.com/sp00nznet/ps3recomp) — sp00nznet и участники
+  (см. [ps3recomp/CONTRIBUTORS.md](ps3recomp/CONTRIBUTORS.md)).
+- [RPCS3](https://rpcs3.net) — используется для расшифровки исполняемого файла игры.
+- Sucker Punch Productions — за игру.
+- [Lorenzo Aiello](https://github.com/aiellolorenzo23) и [ibrahimpuri](https://github.com/ibrahimpuri) — за поддержку
+  оригинального проекта.
+- [Just-Adikus](https://github.com/Just-Adikus) — русская версия и поддержка BCES00609 (этот форк).

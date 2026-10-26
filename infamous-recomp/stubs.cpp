@@ -278,8 +278,16 @@ static int pm_patch_lang_at(uint8_t* p, size_t keylen, const char* nt)
     return 1;
 }
 
+static bool pm_ru()
+{
+    const char* e = std::getenv("PS3_LANG");
+    return e && (((e[0] | 0x20) == 'r' && (e[1] | 0x20) == 'u') || !std::strcmp(e, "8"));
+}
+
 static void pm_thread()
 {
+    const char* t_quit = pm_ru() ? "\xD0\x92\xD1\x8B\xD0\xB9\xD1\x82\xD0\xB8 \xD0\xB8\xD0\xB7 \xD0\xB8\xD0\xB3\xD1\x80\xD1\x8B" : "Quit Game";   /* Выйти из игры */
+    const char* t_set  = pm_ru() ? "\xD0\x9D\xD0\xB0\xD1\x81\xD1\x82\xD1\x80\xD0\xBE\xD0\xB9\xD0\xBA\xD0\xB8" : "Settings";   /* Настройки */
     using namespace std::chrono;
     std::this_thread::sleep_for(seconds(3));
     uint32_t A = 0; bool lq = false, ls = false, script_done = false;
@@ -302,8 +310,8 @@ static void pm_thread()
                 if (!(lq && ls))
                     for (uint8_t* q = (rb < p ? p : rb); q + 96 < re; q++) {
                         if (q[0] != 'u' || q[1] != '_' || q[2] != 'm') continue;
-                        if (!std::memcmp(q, k_q, sizeof k_q)) { if (pm_patch_lang_at(q, sizeof k_q - 1, "Quit Game")) { lq = true; std::fprintf(stderr, "[pausemenu] text Quit Game @0x%08X\n", (uint32_t)(q - vm_base)); } }
-                        else if (!std::memcmp(q, k_s, sizeof k_s)) { if (pm_patch_lang_at(q, sizeof k_s - 1, "Settings")) { ls = true; std::fprintf(stderr, "[pausemenu] text Settings @0x%08X\n", (uint32_t)(q - vm_base)); } }
+                        if (!std::memcmp(q, k_q, sizeof k_q)) { if (pm_patch_lang_at(q, sizeof k_q - 1, t_quit)) { lq = true; std::fprintf(stderr, "[pausemenu] text Quit Game @0x%08X\n", (uint32_t)(q - vm_base)); } }
+                        else if (!std::memcmp(q, k_s, sizeof k_s)) { if (pm_patch_lang_at(q, sizeof k_s - 1, t_set)) { ls = true; std::fprintf(stderr, "[pausemenu] text Settings @0x%08X\n", (uint32_t)(q - vm_base)); } }
                     }
             }
             p = rb + m.size;

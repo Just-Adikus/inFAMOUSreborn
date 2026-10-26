@@ -1,4 +1,4 @@
-//! infamous-installer: builds the inFamous (BCES00220) PC recompilation from the player's own
+//! infamous-installer: builds the inFamous (BCES00609 / BCES00220) PC recompilation from the player's own
 //! copy of the game. No game code or data ships with the port; this tool regenerates it.
 //!
 //!   infamous-installer                       interactive install (double-click)
@@ -347,7 +347,7 @@ fn eboot_hash_check(s: &Session, elf: &Path, lock: Option<&lock::Lock>) -> Resul
         expected.push(e);
     }
     if !expected.is_empty() && !expected.contains(&sha) {
-        let msg = "this EBOOT.elf is not the version the port was made from (expected the European release BCES00220, v1.00 disc executable)";
+        let msg = "this EBOOT.elf is not the version the port was made from (expected the European disc executable v1.00 of BCES00609 / BCES00220)";
         if !s.o.force {
             bail!("{msg}.\n    --force tries anyway; expect the patch step to fail.");
         }

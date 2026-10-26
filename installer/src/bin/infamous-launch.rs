@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 #[cfg_attr(not(windows), allow(dead_code))]
-const REPO_URL: &str = "https://github.com/whompay/inFAMOUSreborn";
+const REPO_URL: &str = "https://github.com/Just-Adikus/inFAMOUSreborn";
 #[cfg_attr(not(windows), allow(dead_code))]
-const REPO_TEXT: &str = "github.com/whompay/inFAMOUSreborn";
+const REPO_TEXT: &str = "github.com/Just-Adikus/inFAMOUSreborn";
 
 // ---- launch.txt ------------------------------------------------------------------------------
 

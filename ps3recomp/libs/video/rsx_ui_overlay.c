@@ -747,9 +747,52 @@ static void build_watermark(void)
     float c[4]; rgba(c, 1.0f, 1.0f, 1.0f, a_max * k);
     text_draw(txt, (int)strlen(txt), (s_vw - w) * 0.5f, 42.0f - sz * 0.62f, sz, c);   /* bar = top ~80 of 720 */
 }
+/* Russian UI (PS3_LANG=russian / ru / 8): the overlay's strings go through T(). */
+static int ui_ru(void)
+{
+    static int r = -1;
+    if (r < 0) { const char* e = getenv("PS3_LANG");
+                 r = e && (((e[0] | 0x20) == 'r' && (e[1] | 0x20) == 'u') || !strcmp(e, "8")); }
+    return r;
+}
+static const char* T(const char* s)
+{
+    static const char* const k[][2] = {
+        { "SETTINGS", "НАСТРОЙКИ" },
+        { "Display Mode", "Режим экрана" }, { "Windowed", "В окне" }, { "Fullscreen", "Полный экран" },
+        { "VSync", "Верт. синхронизация" }, { "Off", "Выкл." }, { "On", "Вкл." },
+        { "Frame Rate Limit", "Ограничение FPS" },
+        { "Button Prompts", "Подсказки кнопок" }, { "Automatic", "Авто" }, { "Controller", "Геймпад" },
+        { "Keyboard & Mouse", "Клавиатура и мышь" },
+        { "Mouse Speed", "Скорость мыши" }, { "1 (Slow)", "1 (медленно)" }, { "5 (Fast)", "5 (быстро)" },
+        { "Resolution", "Разрешение" },
+        { "Shadows", "Тени" },
+        { "Texture Filtering", "Фильтрация текстур" }, { "Game Default", "Как в игре" }, { "Bilinear", "Билинейная" },
+        { "4x Anisotropic", "Анизотропная 4x" }, { "8x Anisotropic", "Анизотропная 8x" }, { "16x Anisotropic", "Анизотропная 16x" },
+        { "Mipmaps", "Мипмапы" },
+        { "Upscaling", "Масштабирование" }, { "Frame Generation", "Генерация кадров" }, { "On (FSR)", "Вкл. (FSR)" },
+        { "Language", "Язык" },
+        { "English (US)", "Английский (США)" }, { "English (UK)", "Английский (Брит.)" }, { "French", "Французский" },
+        { "German", "Немецкий" }, { "Italian", "Итальянский" }, { "Spanish", "Испанский" }, { "Dutch", "Нидерландский" },
+        { "Polish", "Польский" }, { "Portuguese", "Португальский" }, { "Russian", "Русский" },
+        { "Korean (text)", "Корейский (текст)" }, { "Chinese (text)", "Китайский (текст)" },
+        { "(restart)", "(перезапуск)" },
+        { "Back", "Назад" }, { "Quit Game", "Выйти из игры" },
+        { "Up/Down select    Left/Right or click change    Esc / B close",
+          "Вверх/вниз: выбор    Влево/вправо или клик: изменить    Esc / B: закрыть" },
+        { "Settings marked (restart) apply the next time the game starts.",
+          "Пункты с пометкой (перезапуск) применятся при следующем запуске игры." },
+        { "Quit the game? Unsaved progress will be lost.", "Выйти из игры? Несохраненный прогресс будет потерян." },
+        { "Quit", "Выйти" }, { "Cancel", "Отмена" },
+        { "Back   Settings & Quit", "Back   Настройки и выход" },
+    };
+    if (!s || !ui_ru()) return s;
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) if (!strcmp(s, k[i][0])) return k[i][1];
+    return s;
+}
 static void build_hint(void)
 {
-    const char* t = "Back   Settings & Quit";
+    const char* t = T("Back   Settings & Quit");
     float sz = 22.0f, w = text_width(t, (int)strlen(t), sz), x1 = s_vw - 40.0f, x0 = x1 - w - 32.0f, y0 = 30.0f, y1 = y0 + 40.0f;   /* top-right: the game's pause screen keeps that black bar empty */
     float c0[4], c1[4], wt[4];
     rgba(c0, 0, 0, 0, 0.55f); rect(x0, y0, x1, y1, c0, c0, 0);
@@ -779,8 +822,8 @@ static void build_menu(void)
         rect(lx0, ys[i], cx, ys[i] + 2, c0, c1, 1); rect(cx, ys[i], lx1, ys[i] + 2, c1, c0, 1);
     }
     rgba(wt, 0.97f, 0.97f, 0.97f, 1); rgba(gr, 0.60f, 0.60f, 0.60f, 1); rgba(bl, BLUE[0], BLUE[1], BLUE[2], 1);
-    const char* title = "SETTINGS";
-    text_draw(title, 8, cx - text_width(title, 8, 38.0f) * 0.5f, top + 14.0f, 38.0f, wt);
+    const char* title = T("SETTINGS"); const int tl = (int)strlen(title);
+    text_draw(title, tl, cx - text_width(title, tl, 38.0f) * 0.5f, top + 14.0f, 38.0f, wt);
     const float x0 = cx - 400.0f, x1 = cx + 400.0f;
     s_row_x0 = x0 - 20.0f; s_row_x1 = x1 + 20.0f;
     float y = top + (MR_N <= 11 ? 72.0f : 62.0f);
@@ -794,20 +837,21 @@ static void build_menu(void)
         const float* col = on ? wt : gr;
         if (r < MI_N) {
             const MItem* m = &s_mi[r];
-            text_draw(m->label, (int)strlen(m->label), x0, y, lsz, col);
-            if (m->restart) { const char* rs = "(restart)"; float lw = text_width(m->label, (int)strlen(m->label), lsz);
-                              float g2[4]; rgba(g2, 0.45f, 0.45f, 0.45f, 1); text_draw(rs, 9, x0 + lw + 12.0f, y + rh * 0.15f, lsz * 0.7f, g2); }   /* v243K: scales with the row */
-            char v[96]; snprintf(v, sizeof v, "%s   %s   %s", on ? "<" : " ", m->name[m->cur], on ? ">" : " ");
+            const char* lab = T(m->label);
+            text_draw(lab, (int)strlen(lab), x0, y, lsz, col);
+            if (m->restart) { const char* rs = T("(restart)"); float lw = text_width(lab, (int)strlen(lab), lsz);
+                              float g2[4]; rgba(g2, 0.45f, 0.45f, 0.45f, 1); text_draw(rs, (int)strlen(rs), x0 + lw + 12.0f, y + rh * 0.15f, lsz * 0.7f, g2); }   /* v243K: scales with the row */
+            char v[96]; snprintf(v, sizeof v, "%s   %s   %s", on ? "<" : " ", T(m->name[m->cur]), on ? ">" : " ");
             text_draw(v, (int)strlen(v), x1 - text_width(v, (int)strlen(v), lsz), y, lsz, on ? wt : gr);
         } else {
-            const char* t = r == MR_RESUME ? "Back" : "Quit Game";
+            const char* t = T(r == MR_RESUME ? "Back" : "Quit Game");
             text_draw(t, (int)strlen(t), x0, y, lsz, col);
         }
         y += rh;
     }
-    const char* foot = s_menu_confirm ? "" : "Up/Down select    Left/Right or click change    Esc / B close";
+    const char* foot = s_menu_confirm ? "" : T("Up/Down select    Left/Right or click change    Esc / B close");
     if (*foot) text_draw(foot, (int)strlen(foot), cx - text_width(foot, (int)strlen(foot), 19.0f) * 0.5f, bot - 34.0f, 19.0f, gr);
-    if (s_restart_note) { const char* n = "Settings marked (restart) apply the next time the game starts.";
+    if (s_restart_note) { const char* n = T("Settings marked (restart) apply the next time the game starts.");
         float y2[4]; rgba(y2, 1.0f, 0.82f, 0.35f, 1); text_draw(n, (int)strlen(n), cx - text_width(n, (int)strlen(n), 19.0f) * 0.5f, bot - 62.0f, 19.0f, y2); }
 confirm:
     if (s_menu_confirm) {
@@ -816,11 +860,11 @@ confirm:
         const float by0 = UIOV_VW_H * 0.5f - 80.0f, by1 = UIOV_VW_H * 0.5f + 80.0f;
         rgba(c1, 0.02f, 0.02f, 0.03f, 0.95f); rect(0, by0, s_vw, by1, c1, c1, 0);
         rect(lx0, by0, lx1, by0 + 2, bl, bl, 0); rect(lx0, by1 - 2, lx1, by1, bl, bl, 0);
-        const char* q = "Quit the game? Unsaved progress will be lost.";
+        const char* q = T("Quit the game? Unsaved progress will be lost.");
         text_draw(q, (int)strlen(q), cx - text_width(q, (int)strlen(q), 28.0f) * 0.5f, by0 + 26.0f, 28.0f, wt);
-        const char* yn[2] = { "Quit", "Cancel" };
+        const char* yn[2] = { T("Quit"), T("Cancel") };
         for (int i = 0; i < 2; i++) {
-            float bx = cx + (i ? 60.0f : -60.0f - text_width(yn[0], 4, 28.0f));
+            float bx = cx + (i ? 60.0f : -60.0f - text_width(yn[0], (int)strlen(yn[0]), 28.0f));
             const float* cc = (i == s_menu_csel) ? wt : gr;
             text_draw(yn[i], (int)strlen(yn[i]), bx, by1 - 62.0f, 28.0f, cc);
             s_cbtn[i][0] = bx - 16; s_cbtn[i][1] = by1 - 70.0f; s_cbtn[i][2] = bx + text_width(yn[i], (int)strlen(yn[i]), 28.0f) + 16; s_cbtn[i][3] = by1 - 18.0f;

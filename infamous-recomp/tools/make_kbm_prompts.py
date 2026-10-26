@@ -90,10 +90,13 @@ def label(img, txt):
     dr.rounded_rectangle([x0, y0, x1, y1], radius=S*2, fill=face)
     put_text(dr, (x0 - S, y0 - S*0.5, x1 + S, y1 + S*0.5), txt, (255, 255, 255, 255), 0.95, wfrac=1.0)
     return np.array(big.resize((W, H), Image.LANCZOS))
+# KBM_LANG=russian (or PS3_LANG) labels the mouse buttons in Russian: ПКМ / ЛКМ instead of RMB / LMB.
+_lang = (__import__('os').environ.get('KBM_LANG') or __import__('os').environ.get('PS3_LANG') or '').lower()
+RMB, LMB = ('\u041f\u041a\u041c', '\u041b\u041a\u041c') if _lang.startswith('ru') or _lang == '8' else ('RMB', 'LMB')
 JOBS = [  # (oid, kind, text)
     (112262, round_button, 'E'), (104863, round_button, 'C'), (109235, round_button, 'F'), (114719, round_button, ' '),
     (112638, symbol, 'E'), (105340, symbol, 'C'), (109491, symbol, 'F'), (101272, symbol, ' '),
-    (105741, label, 'RMB'), (109557, label, 'LMB'), (111504, label, 'Q'),
+    (105741, label, RMB), (109557, label, LMB), (111504, label, 'Q'),
 ]
 out = b''; prev = []
 for oid, fn, t in JOBS:

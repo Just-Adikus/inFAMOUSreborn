@@ -949,7 +949,7 @@ mod manifest_tests {
     #[test]
     fn shipped_manifest_has_update_section() {
         let m = shipped_manifest();
-        assert_eq!(m.update_repo.as_deref(), Some("whompay/inFAMOUSreborn"));
+        assert_eq!(m.update_repo.as_deref(), Some("Just-Adikus/inFAMOUSreborn"));
         assert_eq!(m.update_branch, "main");
         assert_eq!(m.update_path, "");
         for binary in [

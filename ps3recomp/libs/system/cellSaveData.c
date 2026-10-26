@@ -819,11 +819,30 @@ static void read_param_sfo(const char* save_path, CellSaveDataSystemFileParam* p
  * operation used to look like a dead button.  inFamous exposes one fixed slot;
  * a native confirmation gives that slot visible, cancellable UI without
  * making automatic boot loads or checkpoint saves interactive. */
+#ifdef _WIN32
+/* Game text (save titles, dialog messages) is UTF-8; MessageBoxA would show it in the ANSI code page
+ * (Cyrillic turns into "Р'Рѕ..."). Convert to UTF-16 and use MessageBoxW. */
+static int msgbox_utf8(HWND w, const char* text, const char* caption, UINT flags)
+{
+    static wchar_t wt[4096], wc[256];
+    if (!MultiByteToWideChar(CP_UTF8, 0, text, -1, wt, 4096) ||
+        !MultiByteToWideChar(CP_UTF8, 0, caption, -1, wc, 256))
+        return MessageBoxA(w, text, caption, flags);
+    return MessageBoxW(w, wt, wc, flags);
+}
+static int ui_lang_ru(void)
+{
+    const char* e = getenv("PS3_LANG");
+    return e && (((e[0] | 0x20) == 'r' && (e[1] | 0x20) == 'u') || !strcmp(e, "8"));
+}
+#endif
+#include "savedata_slots.h"   /* RU-patch: in-game save slots */
 static int savedata_native_confirm(const char* dirName, int is_save)
 {
 #ifdef _WIN32
     const char* e = getenv("SAVEDATA_NATIVE_UI");
     if (!e || !e[0] || e[0] == '0') return 1;
+    { save_root_init(); const int sr = ss_confirm(s_save_root, dirName, is_save); if (sr >= 0) return sr; }   /* RU-patch: slot picker */
 
     char path[1024];
     CellSaveDataSystemFileParam param;
@@ -833,17 +852,21 @@ static int savedata_native_confirm(const char* dirName, int is_save)
     char message[1800];
     const char* title = param.title[0] ? param.title : "inFamous save data";
     const char* subtitle = param.subTitle[0] ? param.subTitle : dirName;
+    const int ru = ui_lang_ru();
+    const char* q = is_save ? (dir_has_save(path) ? (ru ? "\xD0\x9F\xD0\xB5\xD1\x80\xD0\xB5\xD0\xB7\xD0\xB0\xD0\xBF\xD0\xB8\xD1\x81\xD0\xB0\xD1\x82\xD1\x8C \xD1\x8D\xD1\x82\xD0\xBE \xD1\x81\xD0\xBE\xD1\x85\xD1\x80\xD0\xB0\xD0\xBD\xD0\xB5\xD0\xBD\xD0\xB8\xD0\xB5?" : "Overwrite this save?")
+                                              : (ru ? "\xD0\xA1\xD0\xBE\xD0\xB7\xD0\xB4\xD0\xB0\xD1\x82\xD1\x8C \xD1\x81\xD0\xBE\xD1\x85\xD1\x80\xD0\xB0\xD0\xBD\xD0\xB5\xD0\xBD\xD0\xB8\xD0\xB5?" : "Create this save?"))
+                      : (ru ? "\xD0\x97\xD0\xB0\xD0\xB3\xD1\x80\xD1\x83\xD0\xB7\xD0\xB8\xD1\x82\xD1\x8C \xD1\x8D\xD1\x82\xD0\xBE \xD1\x81\xD0\xBE\xD1\x85\xD1\x80\xD0\xB0\xD0\xBD\xD0\xB5\xD0\xBD\xD0\xB8\xD0\xB5?" : "Load this save?");
     snprintf(message, sizeof(message),
-             "%s this save?\n\n%s\n%s%s%s",
-             is_save ? (dir_has_save(path) ? "Overwrite" : "Create") : "Load",
+             "%s\n\n%s\n%s%s%s",
+             q,
              title, subtitle,
              param.detail[0] ? "\n\n" : "",
              param.detail[0] ? param.detail : "");
     UINT flags = MB_OKCANCEL | MB_ICONQUESTION | MB_TASKMODAL |
                  MB_SETFOREGROUND | MB_TOPMOST;
-    int accepted = MessageBoxA(GetForegroundWindow(), message,
-                               is_save ? "inFamous - Save Game" : "inFamous - Load Game",
-                               flags) == IDOK;
+    const char* cap = is_save ? (ru ? "inFamous - \xD0\xA1\xD0\xBE\xD1\x85\xD1\x80\xD0\xB0\xD0\xBD\xD0\xB5\xD0\xBD\xD0\xB8\xD0\xB5" : "inFamous - Save Game")
+                              : (ru ? "inFamous - \xD0\x97\xD0\xB0\xD0\xB3\xD1\x80\xD1\x83\xD0\xB7\xD0\xBA\xD0\xB0" : "inFamous - Load Game");
+    int accepted = msgbox_utf8(GetForegroundWindow(), message, cap, flags) == IDOK;
     printf("[cellSaveData] native %s selector: %s '%s'\n",
            is_save ? "save" : "load", accepted ? "accepted" : "cancelled", dirName);
     return accepted;
@@ -1059,6 +1082,9 @@ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
     }
 
     s32 result = savedata_execute(selectedDir, 1, setBuf, funcStat, funcFile, userdata);
+#ifdef _WIN32
+    ss_after_save(selectedDir, result == CELL_OK);   /* RU-patch: copy the new save into the chosen slot */
+#endif
     free(dirList);
     return result;
 }

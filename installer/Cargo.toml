@@ -2,7 +2,7 @@
 name = "infamous-installer"
 version = "0.2.0"
 edition = "2021"
-description = "Builds the inFamous (BCES00220) PC recompilation from the user's own game files"
+description = "Builds the inFamous (BCES00609 / BCES00220) PC recompilation from the user's own game files"
 license = "MIT"
 default-run = "infamous-installer"
 
